@@ -107,7 +107,7 @@ with tab_linkedin:
 with tab_apollo:
     st.subheader("Search Apollo for real contacts")
 
-    apollo_key = os.getenv("APOLLO_API_KEY", "")
+    apollo_key = os.getenv("APOLLO_API_KEY", "") or st.secrets.get("APOLLO_API_KEY", "")
     if not apollo_key:
         st.warning(
             "APOLLO_API_KEY not set. Set it before starting the app:  \n"
@@ -201,7 +201,7 @@ with tab_ai:
     st.caption("Claude generates plausible company profiles matching your ICP. "
                "Use for pipeline inspiration — verify contacts before calling.")
 
-    anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY", "") or st.secrets.get("ANTHROPIC_API_KEY", "")
     if not anthropic_key:
         st.warning(
             "ANTHROPIC_API_KEY not set.  \n"

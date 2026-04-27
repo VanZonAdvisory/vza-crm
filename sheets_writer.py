@@ -20,6 +20,21 @@ from google.oauth2.service_account import Credentials
 
 from config import SHEET_ID, SERVICE_ACCOUNT_JSON, SHEET_COLUMNS
 
+
+def _get_credentials() -> Credentials:
+    """Load credentials from Streamlit secrets (cloud) or local JSON file (local)."""
+    try:
+        import streamlit as st
+        if "gcp_service_account" in st.secrets:
+            return Credentials.from_service_account_info(
+                dict(st.secrets["gcp_service_account"]),
+                scopes=_SCOPES,
+            )
+    except Exception:
+        pass
+    # Fallback to local file
+    return Credentials.from_service_account_file(SERVICE_ACCOUNT_JSON, scopes=_SCOPES)
+
 logger = logging.getLogger(__name__)
 
 # Scopes required for read + write access to Sheets
@@ -37,7 +52,7 @@ def _get_sheet() -> gspread.Worksheet:
     """Return (and lazily initialise) the target worksheet."""
     global _client, _sheet
     if _sheet is None:
-        creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_JSON, scopes=_SCOPES)
+        creds = _get_credentials()
         _client = gspread.authorize(creds)
         spreadsheet = _client.open_by_key(SHEET_ID)
         _sheet = spreadsheet.sheet1  # first tab

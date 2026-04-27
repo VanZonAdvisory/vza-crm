@@ -88,9 +88,15 @@ def generate_leads(
 
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
+        try:
+            import streamlit as st
+            api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+        except Exception:
+            pass
+    if not api_key:
         raise EnvironmentError(
-            "ANTHROPIC_API_KEY environment variable is not set. "
-            "Export it before running this agent."
+            "ANTHROPIC_API_KEY is not set. Set it as an environment variable "
+            "or in Streamlit secrets."
         )
 
     client = anthropic.Anthropic(api_key=api_key)
