@@ -31,8 +31,8 @@ ICP = {
     "region": ["Oost-Brabant", "Brainport Eindhoven"],
     "company_size": "50-500 FTE",
     "target_titles": [
-        "directeur",
-        "operations manager",
+        "Directeur",
+        "Operations Manager",
         "CFO",
     ],
 }
