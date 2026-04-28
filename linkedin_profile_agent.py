@@ -1,12 +1,10 @@
 """
 linkedin_profile_agent.py — Import a single LinkedIn profile into the CRM.
 
-Accepts either a LinkedIn profile URL (scraped via Playwright) or a LinkedIn
-profile PDF (exported via LinkedIn's "Save to PDF" feature), extracts the
-key fields, and calls append_lead().
+Accepts a LinkedIn profile PDF (exported via LinkedIn's "Save to PDF" feature),
+extracts the key fields using Claude AI, and calls append_lead().
 
 Usage:
-    python linkedin_profile_agent.py --url "https://www.linkedin.com/in/janssen-peter/"
     python linkedin_profile_agent.py --pdf "C:/Users/.../peter_janssen.pdf"
     python linkedin_profile_agent.py --pdf "C:/Users/.../peter_janssen.pdf" --url "https://www.linkedin.com/in/janssen-peter/"
 """
@@ -14,9 +12,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
+import os
 import re
-import subprocess
 import sys
 from pathlib import Path
 
@@ -27,11 +26,112 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Known section-label prefixes that LinkedIn sometimes prepends to the name
-# line in PDF exports (Dutch and English).
+# PDF text extraction
 # ---------------------------------------------------------------------------
+
+def _extract_text_from_pdf(pdf_path: str) -> str:
+    """Return all text from a PDF as a single string."""
+    try:
+        import pdfplumber
+    except ImportError:
+        logger.error("pdfplumber not installed. Run: pip install pdfplumber")
+        sys.exit(1)
+
+    pages = []
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text() or ""
+            pages.append(text)
+
+    return "\n".join(pages)
+
+
+# ---------------------------------------------------------------------------
+# Claude-based extraction (primary)
+# ---------------------------------------------------------------------------
+
+def _get_anthropic_api_key() -> str:
+    """Return the Anthropic API key from Streamlit secrets or environment."""
+    try:
+        import streamlit as st
+        try:
+            key = st.secrets["ANTHROPIC_API_KEY"]
+            if key:
+                return str(key)
+        except KeyError:
+            pass
+    except Exception:
+        pass
+    return os.getenv("ANTHROPIC_API_KEY", "")
+
+
+def _parse_with_claude(text: str) -> dict:
+    """
+    Use Claude to extract lead fields from raw LinkedIn PDF text.
+    Returns a dict with keys: name, title, company, location, phone, email.
+    """
+    try:
+        import anthropic
+    except ImportError:
+        raise RuntimeError("anthropic package not installed")
+
+    api_key = _get_anthropic_api_key()
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY not configured")
+
+    client = anthropic.Anthropic(api_key=api_key)
+
+    prompt = f"""You are extracting contact information from a LinkedIn profile PDF export.
+
+The text below was extracted from the PDF. LinkedIn PDFs often use a two-column layout, so the text may be interleaved from different sections.
+
+Extract the following fields:
+- name: The person's full name
+- title: Their current job title
+- company: Their current employer (the company they work at now)
+- location: Their city/region
+- phone: Their phone number (if present)
+- email: Their email address (if present)
+
+Rules:
+- "company" must be an actual company/organisation name, never a section header like "Ervaring", "Vaardigheden", "Belangrijkste vaardigheden", "Skills", "Experience", etc.
+- If a field is not found, return an empty string for that field.
+- Return ONLY a valid JSON object, no explanation.
+
+LinkedIn PDF text:
+{text[:4000]}"""
+
+    response = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=300,
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    raw = response.content[0].text.strip()
+
+    # Strip markdown code fences if present
+    if raw.startswith("```"):
+        raw = re.sub(r"^```[a-z]*\n?", "", raw)
+        raw = re.sub(r"\n?```$", "", raw)
+
+    result = json.loads(raw)
+
+    return {
+        "name":     str(result.get("name",     "") or ""),
+        "title":    str(result.get("title",    "") or ""),
+        "company":  str(result.get("company",  "") or ""),
+        "location": str(result.get("location", "") or ""),
+        "phone":    str(result.get("phone",    "") or ""),
+        "email":    str(result.get("email",    "") or ""),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Regex-based fallback extraction
+# ---------------------------------------------------------------------------
+
 _SECTION_LABEL_PREFIXES = [
-    "contactgegevens ",   # Dutch: "Contact details"
+    "contactgegevens ",
     "contact details ",
     "profiel ",
     "profile ",
@@ -39,12 +139,13 @@ _SECTION_LABEL_PREFIXES = [
     "summary ",
 ]
 
-# Section headers that should never be treated as the person's name.
 _SECTION_HEADERS = {
     "contactgegevens", "contact", "contact details",
     "ervaring", "experience", "werkervaring",
     "opleiding", "education",
     "vaardigheden", "skills",
+    "belangrijkste vaardigheden", "top skills",
+    "alle vaardigheden weergeven",
     "aanbevelingen", "recommendations",
     "certificeringen", "certifications",
     "vrijwilligerswerk", "volunteering",
@@ -57,104 +158,48 @@ _SECTION_HEADERS = {
     "organisaties", "organizations",
     "samenvatting", "summary", "about",
     "onderscheidingen en prijzen", "honors & awards",
+    "overige activiteiten", "bijdragen",
 }
 
 
-# ---------------------------------------------------------------------------
-# PDF extraction
-# ---------------------------------------------------------------------------
-
-def _extract_from_pdf(pdf_path: str) -> dict:
-    """Extract lead fields from a LinkedIn profile PDF."""
-    try:
-        import pdfplumber
-    except ImportError:
-        logger.error("pdfplumber not installed. Run: pip install pdfplumber")
-        sys.exit(1)
-
-    text_lines: list[str] = []
-    with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            page_text = page.extract_text() or ""
-            text_lines.extend(page_text.splitlines())
-
-    # Remove empty lines
-    lines = [l.strip() for l in text_lines if l.strip()]
-
-    if not lines:
-        raise ValueError(f"Could not extract any text from {pdf_path}")
-
-    logger.debug("PDF lines extracted: %s", lines[:20])
-    return _parse_profile_lines(lines)
-
-
 def _parse_profile_lines(lines: list[str]) -> dict:
-    """
-    Parse plain-text lines from a LinkedIn profile into a lead dict.
+    """Regex/heuristic fallback parser for LinkedIn profile text lines."""
+    name = title = company = location = phone = email = ""
 
-    LinkedIn PDF structure (approximate, Dutch):
-      Line 0:  "Contactgegevens Niels van Zon"  (or just the name)
-      Line 1:  Job title / headline  (sometimes "Title bij Company")
-      Line 2:  Location
-      ...
-      Section "Ervaring":
-        Company name (first line below the header)
-        Job title at that company
-    """
-    name     = ""
-    title    = ""
-    company  = ""
-    location = ""
-    phone    = ""
-    email    = ""
-
-    # ------------------------------------------------------------------
-    # Name — first non-empty line that isn't a pure section header.
-    # Strip known Dutch/English label prefixes that LinkedIn prepends.
-    # ------------------------------------------------------------------
+    # Name — first non-empty, non-header line; strip known label prefixes
     name_idx = 0
     for i, line in enumerate(lines):
         clean = line.strip()
         if clean.lower() in _SECTION_HEADERS:
-            continue  # pure header like "Contactgegevens" alone — skip
+            continue
         if not clean or clean.startswith("http") or "@" in clean:
             continue
-
-        # Strip a known prefix if the name was merged with a section label
         lower = clean.lower()
         for prefix in _SECTION_LABEL_PREFIXES:
             if lower.startswith(prefix):
                 clean = clean[len(prefix):].strip()
                 break
-
         if clean:
-            name     = clean
+            name = clean
             name_idx = i
             break
 
-    # ------------------------------------------------------------------
-    # Title (and sometimes company) — line immediately after name
-    # ------------------------------------------------------------------
+    # Title (and optionally company) — line after name
     for line in lines[name_idx + 1: name_idx + 4]:
         clean = line.strip()
         if not clean or clean.lower() in _SECTION_HEADERS:
             continue
-        raw_title = clean
-        # LinkedIn sometimes writes "Title at Company" / "Title bij Company"
         for sep in (" at ", " bij ", " @ "):
-            if sep in raw_title:
-                parts   = raw_title.split(sep, 1)
-                title   = parts[0].strip()
+            if sep in clean:
+                parts = clean.split(sep, 1)
+                title = parts[0].strip()
                 company = parts[1].strip()
                 break
         else:
-            title = raw_title
+            title = clean
         break
 
-    # ------------------------------------------------------------------
-    # Location — short line in the first ~10 lines after the name that
-    # looks geographic (or simply isn't a section header / URL / email).
-    # ------------------------------------------------------------------
+    # Location — short line near the top
     for line in lines[name_idx + 1: name_idx + 10]:
         clean = line.strip()
         if not clean or clean.lower() in _SECTION_HEADERS:
@@ -167,36 +212,27 @@ def _parse_profile_lines(lines: list[str]) -> dict:
             location = clean
             break
 
-    # ------------------------------------------------------------------
-    # Phone — search all lines for a phone-like pattern
-    # ------------------------------------------------------------------
-    phone_pattern = re.compile(
-        r"(\+?31[\s\-]?|0)[\s\-]?"   # NL prefix
-        r"(\d[\s\-]?){8,10}"          # digits
-    )
+    # Phone
+    phone_re = re.compile(r"(\+?31[\s\-]?|0)[\s\-]?(\d[\s\-]?){8,10}")
     for line in lines:
-        match = phone_pattern.search(line)
-        if match:
-            phone = re.sub(r"[\s\-]", "", match.group())
+        m = phone_re.search(line)
+        if m:
+            phone = re.sub(r"[\s\-]", "", m.group())
             break
 
-    # ------------------------------------------------------------------
-    # Email — search all lines
-    # ------------------------------------------------------------------
-    email_pattern = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
+    # Email
+    email_re = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
     for line in lines:
-        match = email_pattern.search(line)
-        if match:
-            email = match.group()
+        m = email_re.search(line)
+        if m:
+            email = m.group()
             break
 
-    # ------------------------------------------------------------------
-    # Company fallback — first non-empty line below "Ervaring" section
-    # ------------------------------------------------------------------
+    # Company fallback — first real line below "Ervaring" / "Werkervaring"
     if not company:
         for i, line in enumerate(lines):
             if line.strip().lower() in ("experience", "werkervaring", "ervaring"):
-                for j in range(i + 1, min(i + 6, len(lines))):
+                for j in range(i + 1, min(i + 15, len(lines))):
                     candidate = lines[j].strip()
                     if (
                         len(candidate) > 2
@@ -220,146 +256,54 @@ def _parse_profile_lines(lines: list[str]) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# URL scraping via Playwright
+# Public extraction entry point
 # ---------------------------------------------------------------------------
 
-def _ensure_chromium() -> None:
-    """Install Playwright's Chromium browser if it is not already present."""
-    logger.info("Ensuring Playwright Chromium is installed…")
-    result = subprocess.run(
-        [sys.executable, "-m", "playwright", "install", "chromium"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        logger.warning("playwright install returned non-zero: %s", result.stderr)
+def _extract_from_pdf(pdf_path: str) -> dict:
+    """
+    Extract lead fields from a LinkedIn profile PDF.
 
+    Tries Claude AI first (handles two-column layout correctly).
+    Falls back to regex parsing if the API is unavailable.
+    """
+    text = _extract_text_from_pdf(pdf_path)
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
 
-def _extract_from_url(url: str) -> dict:
-    """Scrape a LinkedIn profile page and return extracted fields."""
+    if not lines:
+        raise ValueError(f"Could not extract any text from {pdf_path}")
+
+    # Primary: Claude AI
     try:
-        from playwright.sync_api import sync_playwright, Error as PlaywrightError
-    except ImportError:
-        logger.error(
-            "Playwright not installed. Run: pip install playwright && playwright install chromium"
-        )
-        sys.exit(1)
+        fields = _parse_with_claude(text)
+        if fields.get("name") or fields.get("company"):
+            logger.info("Extracted via Claude: %s", fields)
+            return fields
+        logger.warning("Claude returned empty result — falling back to regex")
+    except Exception as exc:
+        logger.warning("Claude extraction failed (%s) — falling back to regex", exc)
 
-    def _do_scrape():
-        with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=True)
-            context = browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/124.0.0.0 Safari/537.36"
-                )
-            )
-            page = context.new_page()
-            logger.info("Opening LinkedIn profile: %s", url)
-            page.goto(url, wait_until="domcontentloaded", timeout=60_000)
-            page.wait_for_timeout(3000)
-
-            # If redirected to login / auth wall, abort — cannot log in headlessly
-            if "login" in page.url or "authwall" in page.url:
-                browser.close()
-                raise RuntimeError(
-                    "LinkedIn requires you to be logged in to view this profile. "
-                    "Please download the profile as a PDF (More → Save to PDF) "
-                    "and upload it instead."
-                )
-
-            def _text(selector: str) -> str:
-                el = page.query_selector(selector)
-                return el.inner_text().strip() if el else ""
-
-            # Name
-            name = _text("h1.text-heading-xlarge") or _text("h1")
-
-            # Headline — LinkedIn shows "Title bij Company" or just a title
-            headline = _text("div.text-body-medium.break-words")
-            title    = headline
-            company  = ""
-            for sep in (" at ", " bij ", " @ ", " - ", " | "):
-                if sep in headline:
-                    parts   = headline.split(sep, 1)
-                    title   = parts[0].strip()
-                    company = parts[1].strip()
-                    break
-
-            # Company from experience section if headline had no separator
-            if not company:
-                for selector in [
-                    "section[id*='experience'] div.t-bold span[aria-hidden='true']",
-                    "section[data-section='experience'] span.t-bold",
-                    "li[data-view-name='profile-component-entity']:first-child span.t-bold",
-                ]:
-                    el = page.query_selector(selector)
-                    if el:
-                        candidate = el.inner_text().strip()
-                        if candidate and candidate.lower() != title.lower():
-                            company = candidate
-                            break
-
-            # Location
-            location = _text("span.text-body-small.inline.t-black--light.break-words")
-
-            # Phone & email — try contact-info modal
-            phone = ""
-            email = ""
-            try:
-                contact_link = page.query_selector("a[href*='contact-info']")
-                if contact_link:
-                    contact_link.click()
-                    page.wait_for_timeout(1500)
-                    phone_el = page.query_selector("section.ci-phone span.t-14")
-                    if phone_el:
-                        phone = phone_el.inner_text().strip()
-                    email_el = page.query_selector("section.ci-email a.t-14")
-                    if email_el:
-                        email = email_el.inner_text().strip()
-                    page.keyboard.press("Escape")
-            except Exception:
-                pass
-
-            browser.close()
-
-        return {
-            "name":     name,
-            "title":    title,
-            "company":  company,
-            "location": location,
-            "phone":    phone,
-            "email":    email,
-        }
-
-    # First attempt — if Chromium is not installed, install it and retry once
-    try:
-        return _do_scrape()
-    except PlaywrightError as exc:
-        if "Executable doesn't exist" in str(exc):
-            logger.info("Chromium not found — installing now…")
-            _ensure_chromium()
-            return _do_scrape()   # second attempt after install
-        raise
+    # Fallback: regex / heuristic
+    fields = _parse_profile_lines(lines)
+    logger.info("Extracted via regex: %s", fields)
+    return fields
 
 
 # ---------------------------------------------------------------------------
-# Build CRM row and write
+# Build CRM row
 # ---------------------------------------------------------------------------
 
 def _to_lead_row(fields: dict, linkedin_url: str = "") -> dict:
     return {
-        "Company name":      fields.get("company", ""),
+        "Company name":      fields.get("company",  ""),
         "Location":          fields.get("location", ""),
         "Industry":          "",
-        "DMU name":          fields.get("name", ""),
-        "DMU phone":         fields.get("phone", ""),
-        "DMU mail":          fields.get("email", ""),
+        "DMU name":          fields.get("name",     ""),
+        "DMU phone":         fields.get("phone",    ""),
+        "DMU mail":          fields.get("email",    ""),
         "expected desire":   "",
         "comp. phone":       "",
         "comp. mail":        "",
-        "notes":             fields.get("title", ""),
+        "notes":             fields.get("title",    ""),
         "owner":             "",
         "last tried call":   "",
         "last spoken":       "",
@@ -377,28 +321,18 @@ def _to_lead_row(fields: dict, linkedin_url: str = "") -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Import a LinkedIn profile (URL or PDF) into the CRM"
+        description="Import a LinkedIn profile PDF into the CRM"
     )
-    parser.add_argument("--url", help="LinkedIn profile URL")
-    parser.add_argument("--pdf", help="Path to a LinkedIn profile PDF")
+    parser.add_argument("--pdf", required=True, help="Path to a LinkedIn profile PDF")
+    parser.add_argument("--url", help="LinkedIn profile URL (used for deduplication)")
     args = parser.parse_args()
 
-    if not args.url and not args.pdf:
-        parser.error("Provide at least --url or --pdf (or both)")
+    pdf_path = Path(args.pdf)
+    if not pdf_path.exists():
+        logger.error("PDF file not found: %s", args.pdf)
+        sys.exit(1)
 
-    fields: dict = {}
-
-    if args.pdf:
-        pdf_path = Path(args.pdf)
-        if not pdf_path.exists():
-            logger.error("PDF file not found: %s", args.pdf)
-            sys.exit(1)
-        logger.info("Extracting from PDF: %s", args.pdf)
-        fields = _extract_from_pdf(str(pdf_path))
-
-    if args.url and not fields.get("name"):
-        logger.info("Extracting from URL: %s", args.url)
-        fields = _extract_from_url(args.url)
+    fields = _extract_from_pdf(str(pdf_path))
 
     logger.info(
         "Extracted — name: %r  title: %r  company: %r  phone: %r  email: %r",
@@ -411,12 +345,12 @@ def main() -> None:
         sys.exit(1)
 
     row = _to_lead_row(fields, linkedin_url=args.url or "")
-
     written = append_lead(row)
+
     if written:
-        print(f"\nDone. Lead '{fields.get('name')}' at '{fields.get('company')}' written to CRM.")
+        print(f"\nDone. '{fields.get('name')}' at '{fields.get('company')}' written to CRM.")
     else:
-        print(f"\nSkipped — '{fields.get('name')}' at '{fields.get('company')}' already exists in CRM.")
+        print(f"\nSkipped — '{fields.get('name')}' at '{fields.get('company')}' already exists.")
 
 
 if __name__ == "__main__":
