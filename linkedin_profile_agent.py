@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import logging
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -23,6 +24,40 @@ from sheets_writer import append_lead
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Known section-label prefixes that LinkedIn sometimes prepends to the name
+# line in PDF exports (Dutch and English).
+# ---------------------------------------------------------------------------
+_SECTION_LABEL_PREFIXES = [
+    "contactgegevens ",   # Dutch: "Contact details"
+    "contact details ",
+    "profiel ",
+    "profile ",
+    "samenvatting ",
+    "summary ",
+]
+
+# Section headers that should never be treated as the person's name.
+_SECTION_HEADERS = {
+    "contactgegevens", "contact", "contact details",
+    "ervaring", "experience", "werkervaring",
+    "opleiding", "education",
+    "vaardigheden", "skills",
+    "aanbevelingen", "recommendations",
+    "certificeringen", "certifications",
+    "vrijwilligerswerk", "volunteering",
+    "talen", "languages",
+    "projecten", "projects",
+    "publicaties", "publications",
+    "interessen", "interests",
+    "activiteiten", "activities",
+    "cursussen", "courses",
+    "organisaties", "organizations",
+    "samenvatting", "summary", "about",
+    "onderscheidingen en prijzen", "honors & awards",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -57,53 +92,87 @@ def _parse_profile_lines(lines: list[str]) -> dict:
     """
     Parse plain-text lines from a LinkedIn profile into a lead dict.
 
-    LinkedIn PDF structure (approximate):
-      Line 0:  Full name
-      Line 1:  Job title  (sometimes "Title at Company" or just title)
+    LinkedIn PDF structure (approximate, Dutch):
+      Line 0:  "Contactgegevens Niels van Zon"  (or just the name)
+      Line 1:  Job title / headline  (sometimes "Title bij Company")
       Line 2:  Location
-      ...      Experience section contains current company details
+      ...
+      Section "Ervaring":
+        Company name (first line below the header)
+        Job title at that company
     """
     name     = ""
     title    = ""
     company  = ""
     location = ""
     phone    = ""
+    email    = ""
 
-    # Name is almost always the first non-empty line
-    if lines:
-        name = lines[0]
+    # ------------------------------------------------------------------
+    # Name — first non-empty line that isn't a pure section header.
+    # Strip known Dutch/English label prefixes that LinkedIn prepends.
+    # ------------------------------------------------------------------
+    name_idx = 0
+    for i, line in enumerate(lines):
+        clean = line.strip()
+        if clean.lower() in _SECTION_HEADERS:
+            continue  # pure header like "Contactgegevens" alone — skip
+        if not clean or clean.startswith("http") or "@" in clean:
+            continue
 
-    # Title is usually the second line
-    if len(lines) > 1:
-        raw_title = lines[1]
-        # LinkedIn sometimes writes "Title at Company"
-        if " at " in raw_title:
-            parts   = raw_title.split(" at ", 1)
-            title   = parts[0].strip()
-            company = parts[1].strip()
-        elif " bij " in raw_title:  # Dutch LinkedIn
-            parts   = raw_title.split(" bij ", 1)
-            title   = parts[0].strip()
-            company = parts[1].strip()
+        # Strip a known prefix if the name was merged with a section label
+        lower = clean.lower()
+        for prefix in _SECTION_LABEL_PREFIXES:
+            if lower.startswith(prefix):
+                clean = clean[len(prefix):].strip()
+                break
+
+        if clean:
+            name     = clean
+            name_idx = i
+            break
+
+    # ------------------------------------------------------------------
+    # Title (and sometimes company) — line immediately after name
+    # ------------------------------------------------------------------
+    for line in lines[name_idx + 1: name_idx + 4]:
+        clean = line.strip()
+        if not clean or clean.lower() in _SECTION_HEADERS:
+            continue
+        raw_title = clean
+        # LinkedIn sometimes writes "Title at Company" / "Title bij Company"
+        for sep in (" at ", " bij ", " @ "):
+            if sep in raw_title:
+                parts   = raw_title.split(sep, 1)
+                title   = parts[0].strip()
+                company = parts[1].strip()
+                break
         else:
             title = raw_title
+        break
 
-    # Location — look for a line that looks like a city/region
-    location_keywords = ["brabant", "eindhoven", "tilburg", "den bosch", "helmond",
-                         "nederland", "netherlands", "noord", "limburg", "gelderland"]
-    for line in lines[2:8]:
-        if any(kw in line.lower() for kw in location_keywords):
-            location = line
+    # ------------------------------------------------------------------
+    # Location — short line in the first ~10 lines after the name that
+    # looks geographic (or simply isn't a section header / URL / email).
+    # ------------------------------------------------------------------
+    for line in lines[name_idx + 1: name_idx + 10]:
+        clean = line.strip()
+        if not clean or clean.lower() in _SECTION_HEADERS:
+            continue
+        if clean == title or clean == company:
+            continue
+        if any(c in clean for c in ["@", "http", "linkedin"]):
+            continue
+        if len(clean) < 80:
+            location = clean
             break
-        # Fallback: short lines after title are often location
-        if len(line) < 60 and not any(c in line for c in ["@", "http", "linkedin"]):
-            if location == "":
-                location = line
 
+    # ------------------------------------------------------------------
     # Phone — search all lines for a phone-like pattern
+    # ------------------------------------------------------------------
     phone_pattern = re.compile(
-        r"(\+?31[\s\-]?|0)[\s\-]?"         # NL prefix
-        r"(\d[\s\-]?){8,10}"               # digits
+        r"(\+?31[\s\-]?|0)[\s\-]?"   # NL prefix
+        r"(\d[\s\-]?){8,10}"          # digits
     )
     for line in lines:
         match = phone_pattern.search(line)
@@ -111,14 +180,31 @@ def _parse_profile_lines(lines: list[str]) -> dict:
             phone = re.sub(r"[\s\-]", "", match.group())
             break
 
-    # Company fallback — look for "Experience" section header, grab next company
+    # ------------------------------------------------------------------
+    # Email — search all lines
+    # ------------------------------------------------------------------
+    email_pattern = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
+    for line in lines:
+        match = email_pattern.search(line)
+        if match:
+            email = match.group()
+            break
+
+    # ------------------------------------------------------------------
+    # Company fallback — first non-empty line below "Ervaring" section
+    # ------------------------------------------------------------------
     if not company:
         for i, line in enumerate(lines):
-            if line.lower() in ("experience", "werkervaring"):
-                # Next non-empty line after "Experience" is often the company or title
-                for j in range(i + 1, min(i + 5, len(lines))):
-                    candidate = lines[j]
-                    if len(candidate) > 2 and candidate not in ("·", "-"):
+            if line.strip().lower() in ("experience", "werkervaring", "ervaring"):
+                for j in range(i + 1, min(i + 6, len(lines))):
+                    candidate = lines[j].strip()
+                    if (
+                        len(candidate) > 2
+                        and candidate not in ("·", "-")
+                        and candidate.lower() not in _SECTION_HEADERS
+                        and "@" not in candidate
+                        and not candidate.startswith("http")
+                    ):
                         company = candidate
                         break
                 break
@@ -129,6 +215,7 @@ def _parse_profile_lines(lines: list[str]) -> dict:
         "company":  company,
         "location": location,
         "phone":    phone,
+        "email":    email,
     }
 
 
@@ -136,98 +223,125 @@ def _parse_profile_lines(lines: list[str]) -> dict:
 # URL scraping via Playwright
 # ---------------------------------------------------------------------------
 
+def _ensure_chromium() -> None:
+    """Install Playwright's Chromium browser if it is not already present."""
+    logger.info("Ensuring Playwright Chromium is installed…")
+    result = subprocess.run(
+        [sys.executable, "-m", "playwright", "install", "chromium"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        logger.warning("playwright install returned non-zero: %s", result.stderr)
+
+
 def _extract_from_url(url: str) -> dict:
     """Scrape a LinkedIn profile page and return extracted fields."""
     try:
-        from playwright.sync_api import sync_playwright
+        from playwright.sync_api import sync_playwright, Error as PlaywrightError
     except ImportError:
-        logger.error("Playwright not installed. Run: pip install playwright && playwright install chromium")
+        logger.error(
+            "Playwright not installed. Run: pip install playwright && playwright install chromium"
+        )
         sys.exit(1)
 
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
-        context = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
+    def _do_scrape():
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            context = browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                )
             )
-        )
-        page = context.new_page()
-        logger.info("Opening LinkedIn profile: %s", url)
-        page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+            page = context.new_page()
+            logger.info("Opening LinkedIn profile: %s", url)
+            page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+            page.wait_for_timeout(3000)
 
-        # Wait for login wall or profile to load
-        page.wait_for_timeout(3000)
+            # If redirected to login / auth wall, abort — cannot log in headlessly
+            if "login" in page.url or "authwall" in page.url:
+                browser.close()
+                raise RuntimeError(
+                    "LinkedIn requires you to be logged in to view this profile. "
+                    "Please download the profile as a PDF (More → Save to PDF) "
+                    "and upload it instead."
+                )
 
-        # If redirected to login page, wait for user to log in manually
-        if "login" in page.url or "authwall" in page.url:
-            logger.info("LinkedIn login required — please log in in the browser window.")
-            page.wait_for_url("**/in/**", timeout=120_000)
-            page.wait_for_timeout(2000)
-
-        def _text(selector: str) -> str:
-            el = page.query_selector(selector)
-            return el.inner_text().strip() if el else ""
-
-        # Name
-        name = _text("h1.text-heading-xlarge") or _text("h1")
-
-        # Headline — LinkedIn shows "Title at Company" or just a title
-        headline = _text("div.text-body-medium.break-words")
-
-        # Parse title and company from headline
-        title   = headline
-        company = ""
-        for sep in (" at ", " bij ", " @ ", " - ", " | "):
-            if sep in headline:
-                parts   = headline.split(sep, 1)
-                title   = parts[0].strip()
-                company = parts[1].strip()
-                break
-
-        # If headline didn't contain a separator, try the experience section
-        if not company:
-            # Modern LinkedIn: first experience card company name
-            for selector in [
-                "section[id*='experience'] div.t-bold span[aria-hidden='true']",
-                "section[data-section='experience'] span.t-bold",
-                "li[data-view-name='profile-component-entity']:first-child span.t-bold",
-            ]:
+            def _text(selector: str) -> str:
                 el = page.query_selector(selector)
-                if el:
-                    candidate = el.inner_text().strip()
-                    # Skip if it looks like a job title (same as title)
-                    if candidate and candidate.lower() != title.lower():
-                        company = candidate
-                        break
+                return el.inner_text().strip() if el else ""
 
-        # Location
-        location = _text("span.text-body-small.inline.t-black--light.break-words")
+            # Name
+            name = _text("h1.text-heading-xlarge") or _text("h1")
 
-        # Phone — LinkedIn only shows phone to connections; try contact-info modal
-        phone = ""
-        try:
-            contact_link = page.query_selector("a[href*='contact-info']")
-            if contact_link:
-                contact_link.click()
-                page.wait_for_timeout(1500)
-                phone_el = page.query_selector("section.ci-phone span.t-14")
-                if phone_el:
-                    phone = phone_el.inner_text().strip()
-                page.keyboard.press("Escape")
-        except Exception:
-            pass
+            # Headline — LinkedIn shows "Title bij Company" or just a title
+            headline = _text("div.text-body-medium.break-words")
+            title    = headline
+            company  = ""
+            for sep in (" at ", " bij ", " @ ", " - ", " | "):
+                if sep in headline:
+                    parts   = headline.split(sep, 1)
+                    title   = parts[0].strip()
+                    company = parts[1].strip()
+                    break
 
-        browser.close()
+            # Company from experience section if headline had no separator
+            if not company:
+                for selector in [
+                    "section[id*='experience'] div.t-bold span[aria-hidden='true']",
+                    "section[data-section='experience'] span.t-bold",
+                    "li[data-view-name='profile-component-entity']:first-child span.t-bold",
+                ]:
+                    el = page.query_selector(selector)
+                    if el:
+                        candidate = el.inner_text().strip()
+                        if candidate and candidate.lower() != title.lower():
+                            company = candidate
+                            break
 
-    return {
-        "name":     name,
-        "title":    title,
-        "company":  company,
-        "location": location,
-        "phone":    phone,
-    }
+            # Location
+            location = _text("span.text-body-small.inline.t-black--light.break-words")
+
+            # Phone & email — try contact-info modal
+            phone = ""
+            email = ""
+            try:
+                contact_link = page.query_selector("a[href*='contact-info']")
+                if contact_link:
+                    contact_link.click()
+                    page.wait_for_timeout(1500)
+                    phone_el = page.query_selector("section.ci-phone span.t-14")
+                    if phone_el:
+                        phone = phone_el.inner_text().strip()
+                    email_el = page.query_selector("section.ci-email a.t-14")
+                    if email_el:
+                        email = email_el.inner_text().strip()
+                    page.keyboard.press("Escape")
+            except Exception:
+                pass
+
+            browser.close()
+
+        return {
+            "name":     name,
+            "title":    title,
+            "company":  company,
+            "location": location,
+            "phone":    phone,
+            "email":    email,
+        }
+
+    # First attempt — if Chromium is not installed, install it and retry once
+    try:
+        return _do_scrape()
+    except PlaywrightError as exc:
+        if "Executable doesn't exist" in str(exc):
+            logger.info("Chromium not found — installing now…")
+            _ensure_chromium()
+            return _do_scrape()   # second attempt after install
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -241,7 +355,7 @@ def _to_lead_row(fields: dict, linkedin_url: str = "") -> dict:
         "Industry":          "",
         "DMU name":          fields.get("name", ""),
         "DMU phone":         fields.get("phone", ""),
-        "DMU mail":          "",
+        "DMU mail":          fields.get("email", ""),
         "expected desire":   "",
         "comp. phone":       "",
         "comp. mail":        "",
@@ -274,7 +388,6 @@ def main() -> None:
 
     fields: dict = {}
 
-    # PDF takes precedence for field extraction; URL is used for dedup key
     if args.pdf:
         pdf_path = Path(args.pdf)
         if not pdf_path.exists():
@@ -288,8 +401,9 @@ def main() -> None:
         fields = _extract_from_url(args.url)
 
     logger.info(
-        "Extracted — name: %r  title: %r  company: %r  phone: %r",
-        fields.get("name"), fields.get("title"), fields.get("company"), fields.get("phone"),
+        "Extracted — name: %r  title: %r  company: %r  phone: %r  email: %r",
+        fields.get("name"), fields.get("title"), fields.get("company"),
+        fields.get("phone"), fields.get("email"),
     )
 
     if not fields.get("name") and not fields.get("company"):

@@ -208,8 +208,10 @@ with tab_linkedin:
                 col1, col2 = st.columns(2)
                 col1.metric("Name",    fields.get("name",  "—"))
                 col1.metric("Title",   fields.get("title", "—"))
+                col1.metric("Email",   fields.get("email", "—") or "not listed")
                 col2.metric("Company", fields.get("company", "—"))
                 col2.metric("Phone",   fields.get("phone", "—") or "not listed")
+                col2.metric("Location", fields.get("location", "—") or "not listed")
 
                 with st.spinner("Writing to CRM…"):
                     row     = _to_lead_row(fields, linkedin_url=linkedin_url or "")

@@ -12,7 +12,9 @@ Responsibilities:
 
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 from typing import Any
 
 import gspread
@@ -22,17 +24,49 @@ from config import SHEET_ID, SERVICE_ACCOUNT_JSON, SHEET_COLUMNS
 
 
 def _get_credentials() -> Credentials:
-    """Load credentials from Streamlit secrets (cloud) or local JSON file (local)."""
+    """
+    Load credentials from Streamlit secrets (Streamlit Cloud) or a local
+    JSON key file (local development).
+
+    On Streamlit Cloud add a [gcp_service_account] section to your app
+    secrets (Settings → Secrets).  The section must contain all fields
+    from the service-account JSON file.
+    """
+    # ------------------------------------------------------------------ #
+    # 1. Streamlit Cloud — secrets injected via the dashboard             #
+    # ------------------------------------------------------------------ #
     try:
         import streamlit as st
-        if "gcp_service_account" in st.secrets:
-            return Credentials.from_service_account_info(
-                dict(st.secrets["gcp_service_account"]),
-                scopes=_SCOPES,
-            )
-    except Exception:
-        pass
-    # Fallback to local file
+
+        sa = st.secrets.get("gcp_service_account")
+        if sa is not None:
+            # Force a plain Python dict so google-auth doesn't trip on
+            # Streamlit's AttrDict.  json round-trip is the safest way.
+            info = json.loads(json.dumps(dict(sa)))
+            logger.info("Loading GCP credentials from Streamlit secrets")
+            return Credentials.from_service_account_info(info, scopes=_SCOPES)
+
+        logger.warning(
+            "[gcp_service_account] section not found in Streamlit secrets — "
+            "falling back to local JSON file"
+        )
+    except Exception as exc:
+        logger.warning(
+            "Could not read Streamlit secrets (%s) — falling back to local JSON file",
+            exc,
+        )
+
+    # ------------------------------------------------------------------ #
+    # 2. Local development — JSON key file on disk                        #
+    # ------------------------------------------------------------------ #
+    if not Path(SERVICE_ACCOUNT_JSON).exists():
+        raise RuntimeError(
+            "Google Sheets credentials not found.\n"
+            "  • Streamlit Cloud: add a [gcp_service_account] section to your app secrets.\n"
+            f"  • Local development: place the JSON key file at {SERVICE_ACCOUNT_JSON}"
+        )
+
+    logger.info("Loading GCP credentials from %s", SERVICE_ACCOUNT_JSON)
     return Credentials.from_service_account_file(SERVICE_ACCOUNT_JSON, scopes=_SCOPES)
 
 logger = logging.getLogger(__name__)
