@@ -36,14 +36,10 @@ def search_apollo(
     locations: list[str],
     per_page: int = 10,
     page: int = 1,
+    api_key: str = "",
 ) -> dict:
-    api_key = os.getenv("APOLLO_API_KEY")
     if not api_key:
-        try:
-            import streamlit as st
-            api_key = st.secrets.get("APOLLO_API_KEY", "")
-        except Exception:
-            pass
+        api_key = os.getenv("APOLLO_API_KEY", "")
     if not api_key:
         raise EnvironmentError("APOLLO_API_KEY is not set.")
 

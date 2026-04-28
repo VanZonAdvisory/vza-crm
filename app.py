@@ -270,7 +270,8 @@ with tab_apollo:
                 )
                 try:
                     data   = search_apollo(titles, industries, locations,
-                                           per_page=int(per_page), page=page)
+                                           per_page=int(per_page), page=page,
+                                           api_key=apollo_key)
                     people = data.get("people") or []
                     all_people.extend(people)
                 except Exception as exc:
