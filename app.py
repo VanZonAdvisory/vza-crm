@@ -191,11 +191,7 @@ with tab_linkedin:
             type=["pdf"],
             help="Export a profile as PDF from LinkedIn and upload it here.",
         )
-        linkedin_url = st.text_input(
-            "LinkedIn profile URL (optional — used for deduplication only)",
-            placeholder="https://www.linkedin.com/in/peter-janssen/",
-            help="Paste the URL to prevent the same person being imported twice.",
-        )
+        linkedin_url = ""
 
     if st.button("Import profile", type="primary", key="btn_linkedin"):
         if not uploaded_pdf:
