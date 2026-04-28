@@ -139,9 +139,10 @@ st.markdown("---")
 # ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
-tab_linkedin, tab_apollo, tab_ai = st.tabs([
+tab_linkedin, tab_apollo, tab_apollo_csv, tab_ai = st.tabs([
     "🔗  LinkedIn Profile",
     "🔍  Apollo Search",
+    "📄  Apollo CSV",
     "🤖  AI Company Discovery",
 ])
 
@@ -154,44 +155,54 @@ with tab_linkedin:
     st.caption("Paste a profile URL, upload a saved PDF, or both. The lead is added to the CRM after deduplication.")
 
     st.info(
-        "**How to export a LinkedIn profile as PDF:**  \n"
-        "Open the profile → click **More** → **Save to PDF** → upload it below.",
+        "**PDF (recommended):** Open the profile → click **More** → **Save to PDF** → upload below.  \n"
+        "**URL only:** paste the profile URL and leave the PDF uploader empty — the page will be scraped automatically.",
         icon="💡",
     )
 
     with st.container(border=True):
         linkedin_url = st.text_input(
-            "LinkedIn profile URL (for deduplication only)",
+            "LinkedIn profile URL",
             placeholder="https://www.linkedin.com/in/peter-janssen/",
-            help="Used to prevent duplicate entries — profile data is extracted from the PDF.",
+            help="Required for URL-only mode. Also used as the deduplication key when a PDF is uploaded.",
         )
         uploaded_pdf = st.file_uploader(
-            "Upload LinkedIn profile PDF",
+            "Upload LinkedIn profile PDF (optional if URL is filled)",
             type=["pdf"],
             help="Export a profile as PDF from LinkedIn and upload it here.",
         )
 
     if st.button("Import profile", type="primary", key="btn_linkedin"):
-        if not uploaded_pdf:
-            st.error("Please upload a LinkedIn profile PDF.")
+        if not uploaded_pdf and not linkedin_url:
+            st.error("Provide a LinkedIn profile URL, upload a PDF, or both.")
         else:
             from linkedin_profile_agent import (
                 _extract_from_pdf,
+                _extract_from_url,
                 _to_lead_row,
             )
             from sheets_writer import append_lead
 
-            with st.spinner("Extracting profile data…"):
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                    tmp.write(uploaded_pdf.read())
-                    tmp_path = tmp.name
-                try:
-                    fields = _extract_from_pdf(tmp_path)
-                finally:
-                    Path(tmp_path).unlink(missing_ok=True)
+            fields: dict = {}
+
+            if uploaded_pdf:
+                with st.spinner("Extracting profile data from PDF…"):
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                        tmp.write(uploaded_pdf.read())
+                        tmp_path = tmp.name
+                    try:
+                        fields = _extract_from_pdf(tmp_path)
+                    finally:
+                        Path(tmp_path).unlink(missing_ok=True)
+            else:
+                with st.spinner("Scraping LinkedIn profile via URL…"):
+                    try:
+                        fields = _extract_from_url(linkedin_url)
+                    except Exception as exc:
+                        st.error(f"Could not scrape the LinkedIn URL: {exc}")
 
             if not fields.get("name") and not fields.get("company"):
-                st.error("Could not extract name or company from the PDF.")
+                st.error("Could not extract name or company from the profile.")
             else:
                 st.success("Profile extracted successfully.")
                 col1, col2 = st.columns(2)
@@ -301,7 +312,97 @@ with tab_apollo:
 
 
 # ===========================================================================
-# TAB 3 — AI Company Discovery
+# TAB 3 — Apollo CSV Import
+# ===========================================================================
+with tab_apollo_csv:
+    st.markdown("#### Import an Apollo.io CSV export")
+    st.caption(
+        "Export contacts from Apollo (People → Export → CSV) and upload the file here. "
+        "Duplicates are skipped automatically."
+    )
+
+    st.info(
+        "**How to export from Apollo:**  \n"
+        "People → select contacts → **Export** → **Export to CSV** → upload the downloaded file below.",
+        icon="💡",
+    )
+
+    with st.container(border=True):
+        uploaded_csv = st.file_uploader(
+            "Upload Apollo CSV export",
+            type=["csv"],
+            help="The CSV must include at least a First Name, Last Name, and Company column.",
+        )
+
+    if uploaded_csv is not None:
+        from apollo_csv_agent import parse_apollo_csv
+
+        try:
+            preview_rows = parse_apollo_csv(uploaded_csv.read())
+            uploaded_csv.seek(0)  # reset so the import button can re-read
+        except Exception as exc:
+            st.error(f"Could not parse the CSV: {exc}")
+            preview_rows = []
+
+        if preview_rows:
+            st.markdown(f"**{len(preview_rows)} contact(s) detected** — preview of first 5:")
+            preview_data = [
+                {
+                    "Name":    r["DMU name"]    or "—",
+                    "Company": r["Company name"] or "—",
+                    "Title":   r["notes"]        or "—",
+                    "Email":   r["DMU mail"]     or "—",
+                    "Phone":   r["DMU phone"]    or "—",
+                }
+                for r in preview_rows[:5]
+            ]
+            st.table(preview_data)
+
+    if st.button("Import CSV to CRM", type="primary", key="btn_apollo_csv"):
+        if uploaded_csv is None:
+            st.error("Please upload an Apollo CSV file first.")
+        else:
+            from apollo_csv_agent import parse_apollo_csv
+            from sheets_writer import append_lead
+
+            try:
+                uploaded_csv.seek(0)
+                rows = parse_apollo_csv(uploaded_csv.read())
+            except Exception as exc:
+                st.error(f"Could not parse the CSV: {exc}")
+                rows = []
+
+            if rows:
+                written = skipped = errors = 0
+                progress = st.progress(0, text="Writing to CRM…")
+
+                for i, row in enumerate(rows):
+                    progress.progress(
+                        int((i + 1) / len(rows) * 100),
+                        text=f"Writing row {i + 1} of {len(rows)}…",
+                    )
+                    if not row["Company name"] and not row["DMU name"]:
+                        skipped += 1
+                        continue
+                    try:
+                        if append_lead(row):
+                            written += 1
+                        else:
+                            skipped += 1
+                    except Exception as exc:
+                        st.error(f"Write error on row {i + 1}: {exc}")
+                        errors += 1
+
+                progress.empty()
+                st.success(
+                    f"✅ Done — **{written}** new lead(s) written, "
+                    f"**{skipped}** duplicate(s) / empty row(s) skipped"
+                    + (f", {errors} error(s)" if errors else "") + "."
+                )
+
+
+# ===========================================================================
+# TAB 4 — AI Company Discovery
 # ===========================================================================
 with tab_ai:
     st.markdown("#### Discover companies with Claude AI")

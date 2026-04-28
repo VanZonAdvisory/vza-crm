@@ -145,7 +145,7 @@ def _extract_from_url(url: str) -> dict:
         sys.exit(1)
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=False)  # headed so you can log in
+        browser = pw.chromium.launch(headless=True)
         context = browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
