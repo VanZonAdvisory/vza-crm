@@ -12,7 +12,6 @@ Responsibilities:
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -22,6 +21,22 @@ from google.oauth2.service_account import Credentials
 
 from config import SHEET_ID, SERVICE_ACCOUNT_JSON, SHEET_COLUMNS
 
+logger = logging.getLogger(__name__)
+
+# Scopes required for read + write access to Sheets
+_SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive.readonly",
+]
+
+# Module-level cache so every agent call within one process reuses the same client
+_client: gspread.Client | None = None
+_sheet: gspread.Worksheet | None = None
+
+
+# ---------------------------------------------------------------------------
+# Credentials
+# ---------------------------------------------------------------------------
 
 def _get_credentials() -> Credentials:
     """
@@ -38,49 +53,95 @@ def _get_credentials() -> Credentials:
     try:
         import streamlit as st
 
-        sa = st.secrets.get("gcp_service_account")
+        # Use [] access — more reliable than .get() across Streamlit versions
+        try:
+            sa = st.secrets["gcp_service_account"]
+        except KeyError:
+            sa = None
+
         if sa is not None:
-            # Force a plain Python dict so google-auth doesn't trip on
-            # Streamlit's AttrDict.  json round-trip is the safest way.
-            info = json.loads(json.dumps(dict(sa)))
+            # Explicitly pull each field as a plain Python string.
+            # Avoids any AttrDict → Credentials conversion issues.
+            info = {
+                "type":                        str(sa.get("type", "service_account")),
+                "project_id":                  str(sa.get("project_id", "")),
+                "private_key_id":              str(sa.get("private_key_id", "")),
+                "private_key":                 str(sa.get("private_key", "")),
+                "client_email":                str(sa.get("client_email", "")),
+                "client_id":                   str(sa.get("client_id", "")),
+                "auth_uri":                    str(sa.get("auth_uri",    "https://accounts.google.com/o/oauth2/auth")),
+                "token_uri":                   str(sa.get("token_uri",   "https://oauth2.googleapis.com/token")),
+                "auth_provider_x509_cert_url": str(sa.get("auth_provider_x509_cert_url", "https://www.googleapis.com/oauth2/v1/certs")),
+                "client_x509_cert_url":        str(sa.get("client_x509_cert_url", "")),
+            }
             logger.info("Loading GCP credentials from Streamlit secrets")
             return Credentials.from_service_account_info(info, scopes=_SCOPES)
 
-        logger.warning(
-            "[gcp_service_account] section not found in Streamlit secrets — "
-            "falling back to local JSON file"
-        )
+        logger.warning("[gcp_service_account] key not found in Streamlit secrets")
+
     except Exception as exc:
-        logger.warning(
-            "Could not read Streamlit secrets (%s) — falling back to local JSON file",
-            exc,
-        )
+        logger.warning("Streamlit secrets unavailable: %s", exc)
 
     # ------------------------------------------------------------------ #
     # 2. Local development — JSON key file on disk                        #
     # ------------------------------------------------------------------ #
-    if not Path(SERVICE_ACCOUNT_JSON).exists():
-        raise RuntimeError(
-            "Google Sheets credentials not found.\n"
-            "  • Streamlit Cloud: add a [gcp_service_account] section to your app secrets.\n"
-            f"  • Local development: place the JSON key file at {SERVICE_ACCOUNT_JSON}"
-        )
+    if Path(SERVICE_ACCOUNT_JSON).exists():
+        logger.info("Loading GCP credentials from %s", SERVICE_ACCOUNT_JSON)
+        return Credentials.from_service_account_file(SERVICE_ACCOUNT_JSON, scopes=_SCOPES)
 
-    logger.info("Loading GCP credentials from %s", SERVICE_ACCOUNT_JSON)
-    return Credentials.from_service_account_file(SERVICE_ACCOUNT_JSON, scopes=_SCOPES)
+    raise RuntimeError(
+        "Google Sheets credentials not found.\n"
+        "  • Streamlit Cloud: add a [gcp_service_account] section under Settings → Secrets.\n"
+        f"  • Local dev: place the JSON key file at {SERVICE_ACCOUNT_JSON}"
+    )
 
-logger = logging.getLogger(__name__)
 
-# Scopes required for read + write access to Sheets
-_SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive.readonly",
-]
+def diagnose_connection() -> dict:
+    """
+    Return a dict describing the connection status — used by the app sidebar.
 
-# Module-level cache so every agent call within one process reuses the same client
-_client: gspread.Client | None = None
-_sheet: gspread.Worksheet | None = None
+    Keys:
+      secrets_accessible  bool   whether st.secrets loaded without error
+      sa_key_present      bool   whether [gcp_service_account] key exists
+      credentials_ok      bool   whether Credentials object was built
+      sheet_title         str    spreadsheet title if fully connected, else ""
+      error               str    first error message encountered, else ""
+    """
+    result = {
+        "secrets_accessible": False,
+        "sa_key_present":     False,
+        "credentials_ok":     False,
+        "sheet_title":        "",
+        "error":              "",
+    }
+    try:
+        import streamlit as st
+        result["secrets_accessible"] = True
+        try:
+            sa = st.secrets["gcp_service_account"]
+            result["sa_key_present"] = sa is not None
+        except KeyError:
+            result["error"] = "[gcp_service_account] not found in Streamlit secrets"
+            return result
+    except Exception as exc:
+        result["error"] = f"Cannot read st.secrets: {exc}"
+        return result
 
+    try:
+        creds = _get_credentials()
+        result["credentials_ok"] = True
+        client = gspread.authorize(creds)
+        sheet = client.open_by_key(SHEET_ID)
+        result["sheet_title"] = sheet.title
+    except Exception as exc:
+        result["error"] = str(exc)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Sheet access
+# ---------------------------------------------------------------------------
 
 def _get_sheet() -> gspread.Worksheet:
     """Return (and lazily initialise) the target worksheet."""

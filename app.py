@@ -137,6 +137,32 @@ with col_title:
 st.markdown("---")
 
 # ---------------------------------------------------------------------------
+# Sidebar — Google Sheets connection diagnostic
+# ---------------------------------------------------------------------------
+with st.sidebar:
+    st.markdown("### Connection status")
+    if st.button("Test Google Sheets connection", key="btn_diag"):
+        from sheets_writer import diagnose_connection
+        with st.spinner("Testing…"):
+            d = diagnose_connection()
+        if d["sheet_title"]:
+            st.success(f"Connected — **{d['sheet_title']}**")
+        else:
+            st.error("Not connected")
+            st.write(f"secrets accessible: `{d['secrets_accessible']}`")
+            st.write(f"[gcp_service_account] present: `{d['sa_key_present']}`")
+            st.write(f"credentials built: `{d['credentials_ok']}`")
+            if d["error"]:
+                st.code(d["error"])
+
+    st.markdown("---")
+    st.caption(
+        "If the test fails, open your Streamlit Cloud app → ⋮ → **Settings** → "
+        "**Secrets** and make sure you have a `[gcp_service_account]` section with "
+        "all fields from your Google service account JSON."
+    )
+
+# ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
 tab_linkedin, tab_apollo, tab_apollo_csv, tab_ai = st.tabs([
@@ -152,65 +178,52 @@ tab_linkedin, tab_apollo, tab_apollo_csv, tab_ai = st.tabs([
 # ===========================================================================
 with tab_linkedin:
     st.markdown("#### Import a LinkedIn profile")
-    st.caption("Paste a profile URL, upload a saved PDF, or both. The lead is added to the CRM after deduplication.")
+    st.caption("Upload a LinkedIn profile PDF. The lead is added to the CRM after deduplication.")
 
     st.info(
-        "**PDF (recommended):** Open the profile → click **More** → **Save to PDF** → upload below.  \n"
-        "**URL only:** paste the profile URL and leave the PDF uploader empty — the page will be scraped automatically.",
+        "**How to export:**  \n"
+        "Open the LinkedIn profile → click **More** → **Save to PDF** → upload the file below.",
         icon="💡",
     )
 
     with st.container(border=True):
-        linkedin_url = st.text_input(
-            "LinkedIn profile URL",
-            placeholder="https://www.linkedin.com/in/peter-janssen/",
-            help="Required for URL-only mode. Also used as the deduplication key when a PDF is uploaded.",
-        )
         uploaded_pdf = st.file_uploader(
-            "Upload LinkedIn profile PDF (optional if URL is filled)",
+            "Upload LinkedIn profile PDF",
             type=["pdf"],
             help="Export a profile as PDF from LinkedIn and upload it here.",
         )
+        linkedin_url = st.text_input(
+            "LinkedIn profile URL (optional — used for deduplication)",
+            placeholder="https://www.linkedin.com/in/peter-janssen/",
+            help="Paste the URL so the same person isn't imported twice.",
+        )
 
     if st.button("Import profile", type="primary", key="btn_linkedin"):
-        if not uploaded_pdf and not linkedin_url:
-            st.error("Provide a LinkedIn profile URL, upload a PDF, or both.")
+        if not uploaded_pdf:
+            st.error("Please upload a LinkedIn profile PDF.")
         else:
-            from linkedin_profile_agent import (
-                _extract_from_pdf,
-                _extract_from_url,
-                _to_lead_row,
-            )
+            from linkedin_profile_agent import _extract_from_pdf, _to_lead_row
             from sheets_writer import append_lead
 
-            fields: dict = {}
-
-            if uploaded_pdf:
-                with st.spinner("Extracting profile data from PDF…"):
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                        tmp.write(uploaded_pdf.read())
-                        tmp_path = tmp.name
-                    try:
-                        fields = _extract_from_pdf(tmp_path)
-                    finally:
-                        Path(tmp_path).unlink(missing_ok=True)
-            else:
-                with st.spinner("Scraping LinkedIn profile via URL…"):
-                    try:
-                        fields = _extract_from_url(linkedin_url)
-                    except Exception as exc:
-                        st.error(f"Could not scrape the LinkedIn URL: {exc}")
+            with st.spinner("Extracting profile data from PDF…"):
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                    tmp.write(uploaded_pdf.read())
+                    tmp_path = tmp.name
+                try:
+                    fields = _extract_from_pdf(tmp_path)
+                finally:
+                    Path(tmp_path).unlink(missing_ok=True)
 
             if not fields.get("name") and not fields.get("company"):
-                st.error("Could not extract name or company from the profile.")
+                st.error("Could not extract name or company from the PDF.")
             else:
                 st.success("Profile extracted successfully.")
                 col1, col2 = st.columns(2)
-                col1.metric("Name",    fields.get("name",  "—"))
-                col1.metric("Title",   fields.get("title", "—"))
-                col1.metric("Email",   fields.get("email", "—") or "not listed")
-                col2.metric("Company", fields.get("company", "—"))
-                col2.metric("Phone",   fields.get("phone", "—") or "not listed")
+                col1.metric("Name",     fields.get("name",     "—"))
+                col1.metric("Title",    fields.get("title",    "—"))
+                col1.metric("Email",    fields.get("email",    "—") or "not listed")
+                col2.metric("Company",  fields.get("company",  "—"))
+                col2.metric("Phone",    fields.get("phone",    "—") or "not listed")
                 col2.metric("Location", fields.get("location", "—") or "not listed")
 
                 with st.spinner("Writing to CRM…"):
@@ -317,71 +330,112 @@ with tab_apollo:
 # TAB 3 — Apollo CSV Import
 # ===========================================================================
 with tab_apollo_csv:
+    import csv as _csv
+    import io as _io
+
+    def _parse_csv(file_bytes: bytes) -> list[dict]:
+        """Convert Apollo CSV bytes to a list of CRM row dicts."""
+        try:
+            text = file_bytes.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = file_bytes.decode("latin-1")
+
+        reader = _csv.DictReader(_io.StringIO(text))
+        rows = []
+        for rec in reader:
+            # Strip whitespace from keys and values
+            rec = {k.strip(): (v or "").strip() for k, v in rec.items()}
+
+            first    = rec.get("First Name", "")
+            last     = rec.get("Last Name",  "")
+            name     = f"{first} {last}".strip()
+            city     = rec.get("City",  "")
+            state    = rec.get("State", "")
+            location = ", ".join(p for p in [city, state] if p)
+
+            rows.append({
+                "Company name":      rec.get("Company",       ""),
+                "Location":          location,
+                "Industry":          rec.get("Industry",      ""),
+                "DMU name":          name,
+                "DMU phone":         rec.get("Phone",         ""),
+                "DMU mail":          rec.get("Email",         ""),
+                "expected desire":   "",
+                "comp. phone":       rec.get("Company Phone", ""),
+                "comp. mail":        rec.get("Website",       ""),
+                "notes":             rec.get("Title",         ""),
+                "owner":             "",
+                "last tried call":   "",
+                "last spoken":       "",
+                "notes2":            "",
+                "sourced":           "Apollo",
+                "phase":             "Attention (lead)",
+                "Rejected (reason)": "",
+            })
+        return rows
+
     st.markdown("#### Import an Apollo.io CSV export")
     st.caption(
-        "Export contacts from Apollo (People → Export → CSV) and upload the file here. "
-        "Duplicates are skipped automatically."
+        "Export contacts from Apollo and upload the CSV here. "
+        "Each row is mapped to the correct CRM column and duplicates are skipped."
     )
 
     st.info(
         "**How to export from Apollo:**  \n"
-        "People → select contacts → **Export** → **Export to CSV** → upload the downloaded file below.",
+        "People → select contacts → **Export** → **Export to CSV** → upload the file below.",
         icon="💡",
     )
 
     with st.container(border=True):
         uploaded_csv = st.file_uploader(
-            "Upload Apollo CSV export",
+            "Upload Apollo CSV",
             type=["csv"],
-            help="The CSV must include at least a First Name, Last Name, and Company column.",
+            key="csv_uploader",
         )
 
+    # Show a live preview as soon as a file is selected
     if uploaded_csv is not None:
-        from apollo_csv_agent import parse_apollo_csv
-
         try:
-            preview_rows = parse_apollo_csv(uploaded_csv.read())
-            uploaded_csv.seek(0)  # reset so the import button can re-read
+            preview_rows = _parse_csv(uploaded_csv.read())
+            uploaded_csv.seek(0)
         except Exception as exc:
-            st.error(f"Could not parse the CSV: {exc}")
+            st.error(f"Could not read the CSV: {exc}")
             preview_rows = []
 
         if preview_rows:
-            st.markdown(f"**{len(preview_rows)} contact(s) detected** — preview of first 5:")
-            preview_data = [
+            st.markdown(f"**{len(preview_rows)} row(s) detected** — preview of first 5:")
+            st.table([
                 {
-                    "Name":    r["DMU name"]    or "—",
+                    "Name":    r["DMU name"]     or "—",
                     "Company": r["Company name"] or "—",
                     "Title":   r["notes"]        or "—",
                     "Email":   r["DMU mail"]     or "—",
                     "Phone":   r["DMU phone"]    or "—",
                 }
                 for r in preview_rows[:5]
-            ]
-            st.table(preview_data)
+            ])
 
-    if st.button("Import CSV to CRM", type="primary", key="btn_apollo_csv"):
+    if st.button("Import to Google Sheets", type="primary", key="btn_apollo_csv"):
         if uploaded_csv is None:
-            st.error("Please upload an Apollo CSV file first.")
+            st.error("Upload a CSV file first.")
         else:
-            from apollo_csv_agent import parse_apollo_csv
             from sheets_writer import append_lead
 
             try:
                 uploaded_csv.seek(0)
-                rows = parse_apollo_csv(uploaded_csv.read())
+                rows = _parse_csv(uploaded_csv.read())
             except Exception as exc:
-                st.error(f"Could not parse the CSV: {exc}")
+                st.error(f"Could not read the CSV: {exc}")
                 rows = []
 
             if rows:
                 written = skipped = errors = 0
-                progress = st.progress(0, text="Writing to CRM…")
+                bar = st.progress(0, text="Writing to Google Sheets…")
 
                 for i, row in enumerate(rows):
-                    progress.progress(
+                    bar.progress(
                         int((i + 1) / len(rows) * 100),
-                        text=f"Writing row {i + 1} of {len(rows)}…",
+                        text=f"Row {i + 1} of {len(rows)}…",
                     )
                     if not row["Company name"] and not row["DMU name"]:
                         skipped += 1
@@ -392,12 +446,12 @@ with tab_apollo_csv:
                         else:
                             skipped += 1
                     except Exception as exc:
-                        st.error(f"Write error on row {i + 1}: {exc}")
+                        st.error(f"Row {i + 1} failed: {exc}")
                         errors += 1
 
-                progress.empty()
+                bar.empty()
                 st.success(
-                    f"✅ Done — **{written}** new lead(s) written, "
+                    f"✅ Done — **{written}** new lead(s) added, "
                     f"**{skipped}** duplicate(s) / empty row(s) skipped"
                     + (f", {errors} error(s)" if errors else "") + "."
                 )
