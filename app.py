@@ -153,45 +153,45 @@ with tab_linkedin:
     st.markdown("#### Import a LinkedIn profile")
     st.caption("Paste a profile URL, upload a saved PDF, or both. The lead is added to the CRM after deduplication.")
 
+    st.info(
+        "**How to export a LinkedIn profile as PDF:**  \n"
+        "Open the profile → click **More** → **Save to PDF** → upload it below.",
+        icon="💡",
+    )
+
     with st.container(border=True):
         linkedin_url = st.text_input(
-            "LinkedIn profile URL",
+            "LinkedIn profile URL (for deduplication only)",
             placeholder="https://www.linkedin.com/in/peter-janssen/",
+            help="Used to prevent duplicate entries — profile data is extracted from the PDF.",
         )
         uploaded_pdf = st.file_uploader(
-            "Or upload a LinkedIn profile PDF",
+            "Upload LinkedIn profile PDF",
             type=["pdf"],
             help="Export a profile as PDF from LinkedIn and upload it here.",
         )
 
     if st.button("Import profile", type="primary", key="btn_linkedin"):
-        if not linkedin_url and not uploaded_pdf:
-            st.error("Provide a URL, a PDF, or both.")
+        if not uploaded_pdf:
+            st.error("Please upload a LinkedIn profile PDF.")
         else:
             from linkedin_profile_agent import (
                 _extract_from_pdf,
-                _extract_from_url,
                 _to_lead_row,
             )
             from sheets_writer import append_lead
 
-            fields = {}
-
             with st.spinner("Extracting profile data…"):
-                if uploaded_pdf:
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                        tmp.write(uploaded_pdf.read())
-                        tmp_path = tmp.name
-                    try:
-                        fields = _extract_from_pdf(tmp_path)
-                    finally:
-                        Path(tmp_path).unlink(missing_ok=True)
-
-                if linkedin_url and not fields.get("name"):
-                    fields = _extract_from_url(linkedin_url)
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                    tmp.write(uploaded_pdf.read())
+                    tmp_path = tmp.name
+                try:
+                    fields = _extract_from_pdf(tmp_path)
+                finally:
+                    Path(tmp_path).unlink(missing_ok=True)
 
             if not fields.get("name") and not fields.get("company"):
-                st.error("Could not extract name or company from the profile.")
+                st.error("Could not extract name or company from the PDF.")
             else:
                 st.success("Profile extracted successfully.")
                 col1, col2 = st.columns(2)
