@@ -39,7 +39,13 @@ def search_apollo(
 ) -> dict:
     api_key = os.getenv("APOLLO_API_KEY")
     if not api_key:
-        raise EnvironmentError("APOLLO_API_KEY environment variable is not set.")
+        try:
+            import streamlit as st
+            api_key = st.secrets.get("APOLLO_API_KEY", "")
+        except Exception:
+            pass
+    if not api_key:
+        raise EnvironmentError("APOLLO_API_KEY is not set.")
 
     # Apollo expects array parameters as repeated query params: person_titles[]=X&person_titles[]=Y
     params = []
