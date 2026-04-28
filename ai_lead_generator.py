@@ -146,7 +146,110 @@ def _map_to_sheet_row(raw: dict) -> dict:
         "sourced": "AI leadlist",
         "phase": "Attention (lead)",
         "Rejected (reason)": "",
-        # No linkedin_url — dedup will fall back to Company name + DMU name
+    }
+
+
+# ---------------------------------------------------------------------------
+# Company-only discovery (no fabricated personal contacts)
+# ---------------------------------------------------------------------------
+
+_COMPANY_SYSTEM_PROMPT = """\
+You are a B2B market research specialist. When given an Ideal Customer Profile (ICP),
+you return a JSON array of real companies that match the profile.
+
+Each element must be a JSON object with exactly these keys (use empty string "" if unknown):
+
+  company_name      — full legal or trading name of the company
+  location          — city, region (e.g. "Eindhoven, Noord-Brabant")
+  industry          — primary industry sector
+  company_size      — approximate headcount (e.g. "120 FTE")
+  company_phone     — main switchboard number (if publicly known)
+  company_website   — company website URL
+  expected_desire   — one sentence on why this company likely needs AI training or process improvement
+  notes             — any other relevant context
+
+Only include companies that actually exist. Do NOT invent personal contacts.
+Return ONLY the JSON array — no markdown fences, no preamble, no explanation.
+"""
+
+
+def generate_company_leads(
+    industry: list[str] | None = None,
+    region: list[str] | None = None,
+    size: str | None = None,
+    count: int = 10,
+) -> list[dict]:
+    """
+    Ask Claude to identify real companies matching the ICP.
+    Returns company-level data only — no personal contacts.
+    """
+    industry = industry or ICP["industry"]
+    region   = region   or ICP["region"]
+    size     = size     or ICP["company_size"]
+
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        try:
+            import streamlit as st
+            api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+        except Exception:
+            pass
+    if not api_key:
+        raise EnvironmentError("ANTHROPIC_API_KEY is not set.")
+
+    client = anthropic.Anthropic(api_key=api_key)
+
+    user_prompt = (
+        f"Identify {count} real companies in the following market:\n"
+        f"- Industry: {', '.join(industry)}\n"
+        f"- Region: {', '.join(region)}\n"
+        f"- Company size: {size}\n\n"
+        "Focus on companies likely to benefit from AI training, digital upskilling, "
+        "or operational process improvement programmes.\n"
+        "Return the JSON array now."
+    )
+
+    logger.info("Sending company discovery prompt to Claude (%s)…", CLAUDE_MODEL)
+    message = client.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=4096,
+        system=_COMPANY_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_prompt}],
+    )
+
+    raw_text = message.content[0].text.strip()
+    try:
+        leads_raw: list[Any] = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        logger.error("Claude returned invalid JSON: %s\n\n%s", exc, raw_text)
+        raise
+
+    if not isinstance(leads_raw, list):
+        raise ValueError(f"Expected a JSON array, got {type(leads_raw).__name__}")
+
+    return leads_raw
+
+
+def _map_company_to_sheet_row(raw: dict) -> dict:
+    """Convert a Claude company dict to the sheet column schema — no personal contacts."""
+    return {
+        "Company name":      raw.get("company_name",   ""),
+        "Location":          raw.get("location",        ""),
+        "Industry":          raw.get("industry",        ""),
+        "DMU name":          "",
+        "DMU phone":         "",
+        "DMU mail":          "",
+        "expected desire":   raw.get("expected_desire", ""),
+        "comp. phone":       raw.get("company_phone",   ""),
+        "comp. mail":        raw.get("company_website", ""),
+        "notes":             raw.get("notes",           ""),
+        "owner":             "",
+        "last tried call":   "",
+        "last spoken":       "",
+        "notes2":            "",
+        "sourced":           "AI leadlist",
+        "phase":             "Attention (lead)",
+        "Rejected (reason)": "",
     }
 
 
