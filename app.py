@@ -178,11 +178,12 @@ tab_linkedin, tab_apollo, tab_apollo_csv, tab_ai = st.tabs([
 # ===========================================================================
 with tab_linkedin:
     st.markdown("#### Import a LinkedIn profile")
-    st.caption("Upload a LinkedIn profile PDF. The lead is added to the CRM after deduplication.")
+    st.caption("Upload a PDF or paste a URL. The lead is added to the CRM after deduplication.")
 
     st.info(
-        "**How to export:**  \n"
-        "Open the LinkedIn profile → click **More** → **Save to PDF** → upload the file below.",
+        "**PDF (recommended):** Open the profile → **More** → **Save to PDF** → upload below.  \n"
+        "**URL:** Paste the profile URL. Works when you are logged in to LinkedIn in the same "
+        "browser session. The tool will also check the contact-info page for email and phone.",
         icon="💡",
     )
 
@@ -193,29 +194,39 @@ with tab_linkedin:
             help="Export a profile as PDF from LinkedIn and upload it here.",
         )
         linkedin_url = st.text_input(
-            "LinkedIn profile URL (optional — used for deduplication)",
+            "LinkedIn profile URL (used for scraping and/or deduplication)",
             placeholder="https://www.linkedin.com/in/peter-janssen/",
-            help="Paste the URL so the same person isn't imported twice.",
+            help="Used to scrape the profile when no PDF is uploaded, and always used as the dedup key.",
         )
 
     if st.button("Import profile", type="primary", key="btn_linkedin"):
-        if not uploaded_pdf:
-            st.error("Please upload a LinkedIn profile PDF.")
+        if not uploaded_pdf and not linkedin_url:
+            st.error("Provide a LinkedIn profile URL, upload a PDF, or both.")
         else:
-            from linkedin_profile_agent import _extract_from_pdf, _to_lead_row
+            from linkedin_profile_agent import _extract_from_pdf, _extract_from_url, _to_lead_row
             from sheets_writer import append_lead
 
-            with st.spinner("Extracting profile data from PDF…"):
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                    tmp.write(uploaded_pdf.read())
-                    tmp_path = tmp.name
-                try:
-                    fields = _extract_from_pdf(tmp_path)
-                finally:
-                    Path(tmp_path).unlink(missing_ok=True)
+            fields: dict = {}
+
+            if uploaded_pdf:
+                with st.spinner("Extracting profile data from PDF…"):
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                        tmp.write(uploaded_pdf.read())
+                        tmp_path = tmp.name
+                    try:
+                        fields = _extract_from_pdf(tmp_path)
+                    finally:
+                        Path(tmp_path).unlink(missing_ok=True)
+            else:
+                with st.spinner("Scraping LinkedIn profile and contact-info page…"):
+                    try:
+                        fields = _extract_from_url(linkedin_url)
+                    except Exception as exc:
+                        st.error(str(exc))
 
             if not fields.get("name") and not fields.get("company"):
-                st.error("Could not extract name or company from the PDF.")
+                if fields or not uploaded_pdf:
+                    st.error("Could not extract name or company from the profile.")
             else:
                 st.success("Profile extracted successfully.")
                 col1, col2 = st.columns(2)

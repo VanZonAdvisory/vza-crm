@@ -256,6 +256,100 @@ def _parse_profile_lines(lines: list[str]) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# URL scraping via Playwright + Claude
+# ---------------------------------------------------------------------------
+
+def _ensure_chromium() -> None:
+    """Install Playwright's Chromium browser if it is not already present."""
+    import subprocess
+    result = subprocess.run(
+        [sys.executable, "-m", "playwright", "install", "chromium"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        logger.warning("playwright install returned non-zero: %s", result.stderr)
+
+
+def _extract_from_url(url: str) -> dict:
+    """
+    Scrape a LinkedIn profile URL and extract fields using Claude.
+
+    Visits both the main profile page and the /overlay/contact-info/ sub-page
+    so that email, phone, and website are captured when the user is logged in.
+    Requires the Playwright Chromium browser to be installed.
+    """
+    try:
+        from playwright.sync_api import sync_playwright, Error as PlaywrightError
+    except ImportError:
+        raise RuntimeError(
+            "Playwright not installed. Run: pip install playwright && playwright install chromium"
+        )
+
+    # Normalise URL — strip trailing slash
+    url = url.rstrip("/")
+    contact_url = f"{url}/overlay/contact-info/"
+
+    USER_AGENT = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    )
+
+    def _scrape() -> dict:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            context  = browser.new_context(user_agent=USER_AGENT)
+            page     = context.new_page()
+
+            # ---- Main profile page ----------------------------------------
+            logger.info("Opening LinkedIn profile: %s", url)
+            page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+            page.wait_for_timeout(3_000)
+
+            # Detect login / auth wall
+            if "login" in page.url or "authwall" in page.url:
+                browser.close()
+                raise RuntimeError(
+                    "LinkedIn requires you to be logged in to view this profile. "
+                    "Please download the profile as a PDF instead "
+                    "(LinkedIn profile → More → Save to PDF)."
+                )
+
+            profile_text = page.inner_text("body")
+
+            # ---- Contact-info overlay -------------------------------------
+            contact_text = ""
+            try:
+                logger.info("Checking contact info: %s", contact_url)
+                page.goto(contact_url, wait_until="domcontentloaded", timeout=30_000)
+                page.wait_for_timeout(2_000)
+                # If redirected to login, skip silently
+                if "login" not in page.url and "authwall" not in page.url:
+                    contact_text = page.inner_text("body")
+            except Exception as exc:
+                logger.warning("Could not fetch contact-info overlay: %s", exc)
+
+            browser.close()
+
+        # ---- Pass both pages to Claude ------------------------------------
+        combined = (
+            f"=== LINKEDIN PROFILE ===\n{profile_text[:3000]}\n\n"
+            f"=== CONTACT INFO PAGE ===\n{contact_text[:1500]}"
+        )
+        return _parse_with_claude(combined)
+
+    # First attempt — auto-install Chromium and retry if binary is missing
+    try:
+        return _scrape()
+    except PlaywrightError as exc:
+        if "Executable doesn't exist" in str(exc):
+            logger.info("Chromium not found — installing now…")
+            _ensure_chromium()
+            return _scrape()
+        raise
+
+
+# ---------------------------------------------------------------------------
 # Public extraction entry point
 # ---------------------------------------------------------------------------
 
