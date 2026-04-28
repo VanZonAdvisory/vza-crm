@@ -335,37 +335,55 @@ with tab_apollo_csv:
         except UnicodeDecodeError:
             text = file_bytes.decode("latin-1")
 
+        def _clean(val: str) -> str:
+            """Strip whitespace and the leading ' that Apollo adds for Excel."""
+            return val.strip().lstrip("'").strip()
+
         reader = _csv.DictReader(_io.StringIO(text))
         rows = []
         for rec in reader:
-            # Strip whitespace from keys and values
-            rec = {k.strip(): (v or "").strip() for k, v in rec.items()}
+            rec = {k.strip(): _clean(v or "") for k, v in rec.items()}
 
-            first    = rec.get("First Name", "")
-            last     = rec.get("Last Name",  "")
-            name     = f"{first} {last}".strip()
-            city     = rec.get("City",  "")
-            state    = rec.get("State", "")
-            location = ", ".join(p for p in [city, state] if p)
+            # Name
+            first = rec.get("First Name", "")
+            last  = rec.get("Last Name",  "")
+            name  = f"{first} {last}".strip()
+
+            # Location — person city/state/country, fall back to company location
+            city    = rec.get("City",    "") or rec.get("Company City",    "")
+            state   = rec.get("State",   "") or rec.get("Company State",   "")
+            country = rec.get("Country", "") or rec.get("Company Country", "")
+            location = ", ".join(p for p in [city, state, country] if p)
+
+            # Phone — prefer enriched mobile, then work direct, then corporate
+            dmu_phone = (
+                rec.get("Mobile Phone",      "")
+                or rec.get("Work Direct Phone", "")
+                or rec.get("Corporate Phone",   "")
+                or rec.get("Home Phone",        "")
+                or rec.get("Other Phone",       "")
+            )
 
             rows.append({
-                "Company name":      rec.get("Company",       ""),
+                "Company name":      rec.get("Company Name",   ""),
                 "Location":          location,
-                "Industry":          rec.get("Industry",      ""),
+                "Industry":          rec.get("Industry",       ""),
                 "DMU name":          name,
-                "DMU phone":         rec.get("Phone",         ""),
-                "DMU mail":          rec.get("Email",         ""),
+                "DMU phone":         dmu_phone,
+                "DMU mail":          rec.get("Email",          ""),
                 "expected desire":   "",
-                "comp. phone":       rec.get("Company Phone", ""),
-                "comp. mail":        rec.get("Website",       ""),
-                "notes":             rec.get("Title",         ""),
-                "owner":             "",
+                "comp. phone":       _clean(rec.get("Company Phone", "")),
+                "comp. mail":        rec.get("Website",        ""),
+                "notes":             rec.get("Title",          ""),
+                "owner":             rec.get("Contact Owner",  ""),
                 "last tried call":   "",
                 "last spoken":       "",
                 "notes2":            "",
                 "sourced":           "Apollo",
                 "phase":             "Attention (lead)",
                 "Rejected (reason)": "",
+                # Used for deduplication only — not written as a column
+                "linkedin_url":      rec.get("Person Linkedin Url", ""),
             })
         return rows
 
