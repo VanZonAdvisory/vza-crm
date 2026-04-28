@@ -24,7 +24,7 @@ from sheets_writer import append_lead
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-APOLLO_SEARCH_URL = "https://api.apollo.io/api/v1/people/search"
+APOLLO_SEARCH_URL = "https://api.apollo.io/api/v1/mixed_people/api_search"
 
 # ---------------------------------------------------------------------------
 # Apollo search
@@ -41,24 +41,26 @@ def search_apollo(
     if not api_key:
         raise EnvironmentError("APOLLO_API_KEY environment variable is not set.")
 
-    payload = {
-        "person_titles": titles,
-        "person_locations": locations,
-        "organization_industry_tag_ids": [],   # filled via industry name matching below
-        "q_organization_keyword_tags": industries,
-        "organization_num_employees_ranges": ["50,500"],
-        "page": page,
-        "per_page": per_page,
-    }
+    # Apollo expects array parameters as repeated query params: person_titles[]=X&person_titles[]=Y
+    params = []
+    for title in titles:
+        params.append(("person_titles[]", title))
+    for location in locations:
+        params.append(("person_locations[]", location))
+    for industry in industries:
+        params.append(("q_organization_keyword_tags[]", industry))
+    params.append(("organization_num_employees_ranges[]", "50,500"))
+    params.append(("page", page))
+    params.append(("per_page", per_page))
 
     headers = {
-        "X-Api-Key": api_key,
-        "Content-Type": "application/json",
+        "x-api-key": api_key,
+        "accept": "application/json",
     }
-    response = requests.post(APOLLO_SEARCH_URL, json=payload, headers=headers, timeout=30)
+    response = requests.post(APOLLO_SEARCH_URL, params=params, headers=headers, timeout=30)
 
-    if response.status_code == 401:
-        raise PermissionError("Apollo API key is invalid or unauthorised.")
+    if response.status_code in (401, 403):
+        raise PermissionError(f"Apollo access denied ({response.status_code}): {response.text}")
     if response.status_code == 429:
         raise RuntimeError("Apollo rate limit hit — wait a minute and try again.")
     if not response.ok:
