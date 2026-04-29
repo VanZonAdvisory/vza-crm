@@ -141,25 +141,67 @@ st.markdown("---")
 # ---------------------------------------------------------------------------
 with st.sidebar:
     st.markdown("### Connection status")
-    if st.button("Test Google Sheets connection", key="btn_diag"):
+
+    # ---- Google Sheets ----
+    if st.button("Test Google Sheets", key="btn_diag"):
         from sheets_writer import diagnose_connection
         with st.spinner("Testing…"):
             d = diagnose_connection()
         if d["sheet_title"]:
-            st.success(f"Connected — **{d['sheet_title']}**")
+            st.success(f"Sheets — **{d['sheet_title']}**")
         else:
-            st.error("Not connected")
+            st.error("Sheets — not connected")
             st.write(f"secrets accessible: `{d['secrets_accessible']}`")
             st.write(f"[gcp_service_account] present: `{d['sa_key_present']}`")
             st.write(f"credentials built: `{d['credentials_ok']}`")
             if d["error"]:
                 st.code(d["error"])
 
+    # ---- Apollo ----
+    if st.button("Test Apollo API", key="btn_apollo_test"):
+        import requests as _req
+        _key = st.secrets.get("APOLLO_API_KEY", "") or os.getenv("APOLLO_API_KEY", "")
+        if not _key:
+            st.error("Apollo — APOLLO_API_KEY not found in secrets")
+        else:
+            with st.spinner("Testing…"):
+                try:
+                    _resp = _req.post(
+                        "https://api.apollo.io/api/v1/mixed_people/api_search",
+                        params=[("per_page", 1), ("page", 1), ("person_titles[]", "CEO")],
+                        headers={"x-api-key": _key, "accept": "application/json"},
+                        timeout=15,
+                    )
+                    if _resp.ok:
+                        _total = _resp.json().get("pagination", {}).get("total_entries", "?")
+                        st.success(f"Apollo — connected ({_total:,} results for CEO)")
+                    elif _resp.status_code in (401, 403):
+                        st.error(f"Apollo — auth failed ({_resp.status_code})")
+                    else:
+                        st.error(f"Apollo — error {_resp.status_code}")
+                        st.code(_resp.text[:300])
+                except Exception as _e:
+                    st.error(f"Apollo — request failed: {_e}")
+
+    # ---- Tavily ----
+    if st.button("Test Tavily API", key="btn_tavily_test"):
+        _key = st.secrets.get("TAVILY_API_KEY", "") or os.getenv("TAVILY_API_KEY", "")
+        if not _key:
+            st.error("Tavily — TAVILY_API_KEY not found in secrets")
+        else:
+            with st.spinner("Testing…"):
+                try:
+                    from tavily import TavilyClient
+                    _client = TavilyClient(api_key=_key)
+                    _result = _client.search("Van Zon Advisory", max_results=1)
+                    _n = len(_result.get("results", []))
+                    st.success(f"Tavily — connected (returned {_n} result)")
+                except Exception as _e:
+                    st.error(f"Tavily — failed: {_e}")
+
     st.markdown("---")
     st.caption(
-        "If the test fails, open your Streamlit Cloud app → ⋮ → **Settings** → "
-        "**Secrets** and make sure you have a `[gcp_service_account]` section with "
-        "all fields from your Google service account JSON."
+        "Keys configured via **Settings → Secrets** in Streamlit Cloud."
     )
 
 # ---------------------------------------------------------------------------
@@ -422,7 +464,7 @@ with tab_apollo_csv:
                 {
                     "Name":    r["DMU name"]     or "—",
                     "Company": r["Company name"] or "—",
-                    "Title":   r["notes"]        or "—",
+                    "Title":   r["DMU title"]    or "—",
                     "Email":   r["DMU mail"]     or "—",
                     "Phone":   r["DMU phone"]    or "—",
                 }
