@@ -69,29 +69,28 @@ def _parse_deterministic(text: str) -> dict:
     """
     Deterministic parser for LinkedIn "Save to PDF" exports.
 
-    LinkedIn PDFs exported via "Save to PDF" always start with this fixed header
-    (pdfplumber extracts lines roughly in reading order for single-column PDFs,
-    but two-column layouts interleave — hence we scan all lines, not just the top):
+    LinkedIn's PDF always contains this header block in the right column:
+        [Full Name]
+        [Job Title]  OR  [Job Title at/bij Company]
+        [City, Province, Country]
 
-        Contactgegevens [Full Name]   ← or just the name on line 1
-        email@example.com
-        Job Title at/bij Company Name
-        www.linkedin.com/in/...       ← skip
-        City, Province, Country
+    For two-column PDFs pdfplumber dumps the entire left column first (contact
+    info, skills, certifications), so the name can appear 15-20 lines in.
 
     Strategy:
-      1. Regex-extract email and phone from ALL lines first (unambiguous).
-      2. Line 1 (stripped of "Contactgegevens ") → name.
-      3. Scan lines for "X at Y" / "X bij Y" → title + company.
-      4. Scan for geographic location line (contains comma + known geo keyword,
-         or follows the URL block near the top).
-      5. Fall back to Ervaring section for company if not found yet.
+      1. Regex-extract email + phone from all lines.
+      2. Primary name detection: "Contactgegevens [Name]" on one line.
+      3. Fallback name detection: scan for the triple pattern
+         name-candidate → title-candidate → location-candidate.
+      4. Extract title (and optionally company) from the line after the name.
+         "X at/bij Y" splits into title + company; standalone line = title only.
+      5. Ervaring section fallback for company (strips "| ..." suffix).
     """
-    email_re  = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
-    phone_re  = re.compile(r"(\+?31[\s\-]?|0)[\s\-]?(\d[\s\-]?){8,10}")
-    url_re    = re.compile(r"(https?://|www\.)", re.IGNORECASE)
+    email_re = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
+    phone_re = re.compile(r"(\+?31[\s\-]?|0)[\s\-]?(\d[\s\-]?){8,10}")
+    url_re   = re.compile(r"(https?://|www\.)", re.IGNORECASE)
+    at_re    = re.compile(r"\s+(?:at|bij|@)\s+", re.IGNORECASE)
 
-    # Geographic keywords common in Dutch LinkedIn exports
     GEO_KEYWORDS = (
         "nederland", "netherlands", "belgium", "belgië", "duitsland", "germany",
         "noord-brabant", "noord-holland", "zuid-holland", "gelderland", "utrecht",
@@ -99,96 +98,6 @@ def _parse_deterministic(text: str) -> dict:
         "drenthe", "regio", "gebied", "province", "stad", "gemeente",
     )
 
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
-
-    # ------------------------------------------------------------------ #
-    # 1. Email & phone — scan all lines                                   #
-    # ------------------------------------------------------------------ #
-    email = ""
-    phone = ""
-    for line in lines:
-        if not email:
-            m = email_re.search(line)
-            if m:
-                email = m.group()
-        if not phone:
-            m = phone_re.search(line)
-            if m:
-                phone = re.sub(r"[\s\-]", "", m.group())
-
-    # ------------------------------------------------------------------ #
-    # 2. Name — first content line, strip "Contactgegevens " prefix       #
-    # ------------------------------------------------------------------ #
-    name = ""
-    name_idx = 0
-    CONTACT_PREFIX = "contactgegevens "
-    SKIP_HEADERS = {
-        "contactgegevens", "contact details", "profiel", "profile",
-        "samenvatting", "summary", "about",
-    }
-    for i, line in enumerate(lines):
-        lower = line.lower()
-        # Skip pure section headers, URLs, and email lines
-        if lower in SKIP_HEADERS:
-            continue
-        if url_re.search(line) or "linkedin.com" in lower:
-            continue
-        if email_re.fullmatch(line):
-            continue
-        # Strip "Contactgegevens " prefix if present
-        if lower.startswith(CONTACT_PREFIX):
-            line = line[len(CONTACT_PREFIX):].strip()
-        if line:
-            name = line
-            name_idx = i
-            break
-
-    # ------------------------------------------------------------------ #
-    # 3. Title + company — find "X at Y" or "X bij Y" line               #
-    # ------------------------------------------------------------------ #
-    title   = ""
-    company = ""
-    AT_PATTERNS = re.compile(r"\s+(?:at|bij|@)\s+", re.IGNORECASE)
-
-    # Only look in the first 25 lines to avoid picking up experience entries
-    for line in lines[:25]:
-        lower = line.lower()
-        if url_re.search(line) or "linkedin.com" in lower:
-            continue
-        if email_re.search(line):
-            continue
-        m = AT_PATTERNS.search(line)
-        if m:
-            title   = line[:m.start()].strip()
-            company = line[m.end():].strip()
-            break
-
-    # ------------------------------------------------------------------ #
-    # 4. Location — line with geo keyword OR comma-separated near top     #
-    # ------------------------------------------------------------------ #
-    location = ""
-    for line in lines[name_idx + 1: name_idx + 15]:
-        lower = line.lower()
-        if url_re.search(line) or "linkedin.com" in lower:
-            continue
-        if email_re.search(line):
-            continue
-        if line == title or line == company or line == name:
-            continue
-        # Candidate: contains a geographic keyword
-        if any(kw in lower for kw in GEO_KEYWORDS):
-            location = line
-            break
-        # Candidate: two or more comma-separated parts (city, country)
-        parts = [p.strip() for p in line.split(",") if p.strip()]
-        if len(parts) >= 2 and len(line) < 80:
-            location = line
-            break
-
-    # ------------------------------------------------------------------ #
-    # 5. Company fallback — first real line under "Ervaring" section      #
-    # ------------------------------------------------------------------ #
-    EXPERIENCE_HEADERS = {"experience", "werkervaring", "ervaring"}
     SECTION_HEADERS = {
         "contactgegevens", "contact", "contact details",
         "ervaring", "experience", "werkervaring",
@@ -210,6 +119,136 @@ def _parse_deterministic(text: str) -> dict:
         "onderscheidingen en prijzen", "honors & awards",
         "overige activiteiten", "bijdragen",
     }
+
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+
+    # ------------------------------------------------------------------ #
+    # 1. Email & phone — scan all lines                                   #
+    # ------------------------------------------------------------------ #
+    email = phone = ""
+    for line in lines:
+        if not email:
+            m = email_re.search(line)
+            if m:
+                email = m.group()
+        if not phone:
+            m = phone_re.search(line)
+            if m:
+                phone = re.sub(r"[\s\-]", "", m.group())
+
+    # ------------------------------------------------------------------ #
+    # Helpers
+    # ------------------------------------------------------------------ #
+    def _is_noise(line: str) -> bool:
+        """Lines that should never be name / title / location."""
+        lower = line.lower()
+        return (
+            bool(url_re.search(line))
+            or "linkedin" in lower
+            or bool(email_re.fullmatch(line))
+            or bool(phone_re.match(line))
+            or lower in SECTION_HEADERS
+        )
+
+    # Dutch connector particles that can appear in proper names
+    _NAME_CONNECTORS = {
+        "van", "de", "der", "den", "het", "t", "op", "ten", "ter", "te",
+        "and", "en", "el", "la", "al",
+    }
+
+    def _looks_like_name(s: str) -> bool:
+        """True if s could be a person's full name (2-5 words, proper caps)."""
+        words = s.split()
+        if not (2 <= len(words) <= 5):
+            return False
+        if any(c.isdigit() for c in s):
+            return False
+        if any(c in s for c in ["@", "/", "(", ")", ",", "·", "|"]):
+            return False
+        if not words[0][0].isupper() or not words[-1][0].isupper():
+            return False
+        for word in words[1:-1]:
+            if word.lower() not in _NAME_CONNECTORS and not word[0].isupper():
+                return False
+        return True
+
+    def _looks_like_location(s: str) -> bool:
+        lower = s.lower()
+        if any(kw in lower for kw in GEO_KEYWORDS):
+            return True
+        parts = [p.strip() for p in s.split(",") if p.strip()]
+        return len(parts) >= 2 and len(s) < 80
+
+    def _content_lines_after(start_idx: int, count: int) -> list[str]:
+        """Next `count` non-noise lines after start_idx."""
+        result: list[str] = []
+        for line in lines[start_idx + 1:]:
+            if not _is_noise(line):
+                result.append(line)
+            if len(result) >= count:
+                break
+        return result
+
+    # ------------------------------------------------------------------ #
+    # 2. Name — primary: "Contactgegevens [Name]" on one line            #
+    # ------------------------------------------------------------------ #
+    name = title = company = location = ""
+    name_idx = 0
+    CONTACT_PREFIX = "contactgegevens "
+
+    for i, line in enumerate(lines[:5]):
+        if line.lower().startswith(CONTACT_PREFIX):
+            candidate = line[len(CONTACT_PREFIX):].strip()
+            if candidate and _looks_like_name(candidate):
+                name = candidate
+                name_idx = i
+                break
+
+    # ------------------------------------------------------------------ #
+    # 3. Name — fallback: triple-pattern scan (name → title → location)  #
+    # ------------------------------------------------------------------ #
+    if not name:
+        for i, line in enumerate(lines):
+            if _is_noise(line) or not _looks_like_name(line):
+                continue
+            nexts = _content_lines_after(i, 2)
+            if not nexts:
+                continue
+            # Accept if the second content line looks like a location
+            if len(nexts) >= 2 and _looks_like_location(nexts[1]):
+                name = line
+                name_idx = i
+                break
+            # Also accept name→location directly (no separate title line)
+            if _looks_like_location(nexts[0]):
+                name = line
+                name_idx = i
+                break
+
+    # ------------------------------------------------------------------ #
+    # 4. Title + company — first content line after name                 #
+    # ------------------------------------------------------------------ #
+    if name:
+        nexts = _content_lines_after(name_idx, 2)
+        if nexts:
+            first = nexts[0]
+            if _looks_like_location(first):
+                # Name is immediately followed by location (no headline)
+                location = first
+            else:
+                m = at_re.search(first)
+                if m:
+                    title   = first[:m.start()].strip()
+                    company = first[m.end():].strip()
+                else:
+                    title = first
+                if len(nexts) >= 2 and _looks_like_location(nexts[1]):
+                    location = nexts[1]
+
+    # ------------------------------------------------------------------ #
+    # 5. Company fallback — first real line under Ervaring section        #
+    # ------------------------------------------------------------------ #
+    EXPERIENCE_HEADERS = {"experience", "werkervaring", "ervaring"}
     if not company:
         for i, line in enumerate(lines):
             if line.lower() in EXPERIENCE_HEADERS:
@@ -221,8 +260,10 @@ def _parse_deterministic(text: str) -> dict:
                         and cl not in SECTION_HEADERS
                         and not email_re.search(candidate)
                         and not url_re.search(candidate)
+                        and not any(c.isdigit() for c in candidate)
                     ):
-                        company = candidate
+                        # Strip descriptor after " | " (e.g. "Van Zon Advisory | Transformations")
+                        company = candidate.split("|")[0].strip()
                         break
                 break
 
