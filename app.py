@@ -369,7 +369,7 @@ with tab_apollo_csv:
                 "Location":          location,
                 "Industry":          rec.get("Industry",       ""),
                 "DMU name":          name,
-                "role":              rec.get("Title",          ""),
+                "DMU title":         rec.get("Title",          ""),
                 "DMU phone":         dmu_phone,
                 "DMU mail":          rec.get("Email",          ""),
                 "expected desire":   "",

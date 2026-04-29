@@ -68,7 +68,10 @@ def _get_anthropic_api_key() -> str:
 def _parse_with_claude(text: str) -> dict:
     """
     Use Claude to extract lead fields from raw LinkedIn PDF text.
-    Returns a dict with keys: name, title, company, location, phone, email.
+
+    Email and phone are pre-extracted with regex so Claude never sees them
+    in-line and cannot confuse them with title or location.
+    Claude is then only asked for: name, title, company, location.
     """
     try:
         import anthropic
@@ -79,38 +82,66 @@ def _parse_with_claude(text: str) -> dict:
     if not api_key:
         raise RuntimeError("ANTHROPIC_API_KEY not configured")
 
+    # ------------------------------------------------------------------
+    # 1. Pre-extract email and phone with regex — unambiguous patterns
+    # ------------------------------------------------------------------
+    email_re = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
+    phone_re = re.compile(r"(\+?31[\s\-]?|0)[\s\-]?(\d[\s\-]?){8,10}")
+
+    email = ""
+    phone = ""
+    cleaned_lines = []
+
+    for line in text.splitlines():
+        # Extract email from this line if not yet found
+        if not email:
+            m = email_re.search(line)
+            if m:
+                email = m.group()
+
+        # Extract phone from this line if not yet found
+        if not phone:
+            m = phone_re.search(line)
+            if m:
+                phone = re.sub(r"[\s\-]", "", m.group())
+
+        # Remove lines that are purely an email/URL/phone to reduce Claude noise
+        stripped = line.strip()
+        if email_re.fullmatch(stripped):
+            continue
+        if stripped.startswith("http") or "linkedin.com" in stripped.lower():
+            continue
+        cleaned_lines.append(line)
+
+    cleaned_text = "\n".join(cleaned_lines)
+
+    # ------------------------------------------------------------------
+    # 2. Ask Claude only for the four fields it can't confuse
+    # ------------------------------------------------------------------
     client = anthropic.Anthropic(api_key=api_key)
 
-    prompt = f"""You are extracting contact information from a LinkedIn profile PDF export.
+    prompt = f"""Extract four fields from this LinkedIn profile text.
 
-The text below was extracted from the PDF. LinkedIn PDFs often use a two-column layout so lines from different sections may be interleaved.
-
-Extract exactly these six fields:
-
-- name: The person's full name (e.g. "Niels van Zon"). Never a job title or section header.
-- title: Their current job title or function (e.g. "CEO", "Operations Manager", "Directeur"). Never an email address, phone number, or location.
-- company: The name of the company or organisation they currently work at (e.g. "Van Zon Advisory", "CM.com"). Never a section header such as "Ervaring", "Werkervaring", "Experience", "Vaardigheden", "Belangrijkste vaardigheden", "Skills", or similar.
-- location: The city, region or country where they are based (e.g. "'s-Hertogenbosch", "Amsterdam", "Noord-Brabant, Nederland"). Never a job title or email address.
-- phone: Their phone number including country code if present (e.g. "+31 6 12345678"). Empty string if not found.
-- email: Their email address (e.g. "name@domain.com"). Empty string if not found.
+- name: The person's full name (e.g. "Julian Schilder"). A proper name only.
+- title: Their current job title (e.g. "CEO", "Managing Director", "Operations Manager"). A short professional role description only — never a location, URL, or email.
+- company: The company or organisation they currently work at (e.g. "Ceness B.V."). A real company name only — never a section header like "Ervaring", "Vaardigheden", "Belangrijkste vaardigheden", or similar Dutch/English section titles.
+- location: The city, region or country where they are based (e.g. "'s-Hertogenbosch, Noord-Brabant, Nederland"). A geographic location only — never a job title.
 
 Rules:
-- Each field must contain only the type of data described above.
-- If a field cannot be determined with confidence, return an empty string.
-- Return ONLY a valid JSON object with these six keys. No explanation, no markdown.
+- Return ONLY a valid JSON object with exactly these four keys.
+- If a field cannot be determined, return an empty string for it.
+- No explanation, no markdown fences.
 
-LinkedIn PDF text:
-{text[:4000]}"""
+Profile text:
+{cleaned_text[:3500]}"""
 
     response = client.messages.create(
         model="claude-haiku-4-5-20251001",
-        max_tokens=300,
+        max_tokens=200,
         messages=[{"role": "user", "content": prompt}],
     )
 
     raw = response.content[0].text.strip()
-
-    # Strip markdown code fences if present
     if raw.startswith("```"):
         raw = re.sub(r"^```[a-z]*\n?", "", raw)
         raw = re.sub(r"\n?```$", "", raw)
@@ -122,8 +153,8 @@ LinkedIn PDF text:
         "title":    str(result.get("title",    "") or ""),
         "company":  str(result.get("company",  "") or ""),
         "location": str(result.get("location", "") or ""),
-        "phone":    str(result.get("phone",    "") or ""),
-        "email":    str(result.get("email",    "") or ""),
+        "phone":    phone,
+        "email":    email,
     }
 
 
@@ -393,7 +424,7 @@ def _to_lead_row(fields: dict, linkedin_url: str = "") -> dict:
         "Location":          fields.get("location", ""),
         "Industry":          "",
         "DMU name":          fields.get("name",     ""),
-        "role":              fields.get("title",    ""),
+        "DMU title":         fields.get("title",    ""),
         "DMU phone":         fields.get("phone",    ""),
         "DMU mail":          fields.get("email",    ""),
         "expected desire":   "",

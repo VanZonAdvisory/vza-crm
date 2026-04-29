@@ -10,7 +10,7 @@ SHEET_COLUMNS = [
     "Location",
     "Industry",
     "DMU name",
-    "role",
+    "DMU title",
     "DMU phone",
     "DMU mail",
     "expected desire",
