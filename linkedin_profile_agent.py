@@ -83,20 +83,21 @@ def _parse_with_claude(text: str) -> dict:
 
     prompt = f"""You are extracting contact information from a LinkedIn profile PDF export.
 
-The text below was extracted from the PDF. LinkedIn PDFs often use a two-column layout, so the text may be interleaved from different sections.
+The text below was extracted from the PDF. LinkedIn PDFs often use a two-column layout so lines from different sections may be interleaved.
 
-Extract the following fields:
-- name: The person's full name
-- title: Their current job title
-- company: Their current employer (the company they work at now)
-- location: Their city/region
-- phone: Their phone number (if present)
-- email: Their email address (if present)
+Extract exactly these six fields:
+
+- name: The person's full name (e.g. "Niels van Zon"). Never a job title or section header.
+- title: Their current job title or function (e.g. "CEO", "Operations Manager", "Directeur"). Never an email address, phone number, or location.
+- company: The name of the company or organisation they currently work at (e.g. "Van Zon Advisory", "CM.com"). Never a section header such as "Ervaring", "Werkervaring", "Experience", "Vaardigheden", "Belangrijkste vaardigheden", "Skills", or similar.
+- location: The city, region or country where they are based (e.g. "'s-Hertogenbosch", "Amsterdam", "Noord-Brabant, Nederland"). Never a job title or email address.
+- phone: Their phone number including country code if present (e.g. "+31 6 12345678"). Empty string if not found.
+- email: Their email address (e.g. "name@domain.com"). Empty string if not found.
 
 Rules:
-- "company" must be an actual company/organisation name, never a section header like "Ervaring", "Vaardigheden", "Belangrijkste vaardigheden", "Skills", "Experience", etc.
-- If a field is not found, return an empty string for that field.
-- Return ONLY a valid JSON object, no explanation.
+- Each field must contain only the type of data described above.
+- If a field cannot be determined with confidence, return an empty string.
+- Return ONLY a valid JSON object with these six keys. No explanation, no markdown.
 
 LinkedIn PDF text:
 {text[:4000]}"""
@@ -392,18 +393,19 @@ def _to_lead_row(fields: dict, linkedin_url: str = "") -> dict:
         "Location":          fields.get("location", ""),
         "Industry":          "",
         "DMU name":          fields.get("name",     ""),
+        "role":              fields.get("title",    ""),
         "DMU phone":         fields.get("phone",    ""),
         "DMU mail":          fields.get("email",    ""),
         "expected desire":   "",
         "comp. phone":       "",
         "comp. mail":        "",
-        "notes":             fields.get("title",    ""),
+        "notes":             "",
         "owner":             "",
         "last tried call":   "",
         "last spoken":       "",
         "notes2":            "",
         "sourced":           "LinkedIn",
-        "phase":             "Attention (lead)",
+        "phase":             "",
         "Rejected (reason)": "",
         "linkedin_url":      linkedin_url,
     }
