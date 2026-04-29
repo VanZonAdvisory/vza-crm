@@ -165,21 +165,40 @@ with st.sidebar:
             st.error("Apollo — APOLLO_API_KEY not found in secrets")
         else:
             with st.spinner("Testing…"):
+                _headers = {"X-Api-Key": _key, "Content-Type": "application/json", "Cache-Control": "no-cache"}
                 try:
-                    _resp = _req.post(
-                        "https://api.apollo.io/api/v1/mixed_people/api_search",
-                        params=[("per_page", 1), ("page", 1), ("person_titles[]", "CEO")],
-                        headers={"x-api-key": _key, "accept": "application/json"},
-                        timeout=15,
-                    )
-                    if _resp.ok:
-                        _total = _resp.json().get("pagination", {}).get("total_entries", "?")
-                        st.success(f"Apollo — connected ({_total:,} results for CEO)")
-                    elif _resp.status_code in (401, 403):
-                        st.error(f"Apollo — auth failed ({_resp.status_code})")
+                    # Step 1: health check — validates the key itself
+                    _health = _req.get("https://api.apollo.io/v1/auth/health", headers=_headers, timeout=10)
+                    if _health.status_code == 401:
+                        st.error("Apollo — invalid API key (401). Check the key in Streamlit secrets.")
+                    elif _health.status_code == 403:
+                        st.error(
+                            "Apollo — key recognised but access denied (403). "
+                            "You may be using a **scoped** key. Go to Apollo → Settings → API Keys "
+                            "and use the **Master API Key** instead."
+                        )
+                    elif not _health.ok:
+                        st.error(f"Apollo — health check failed ({_health.status_code}): {_health.text[:200]}")
                     else:
-                        st.error(f"Apollo — error {_resp.status_code}")
-                        st.code(_resp.text[:300])
+                        # Step 2: people search
+                        _resp = _req.post(
+                            "https://api.apollo.io/api/v1/mixed_people/api_search",
+                            headers=_headers,
+                            json={"person_titles": ["CEO"], "per_page": 1, "page": 1},
+                            timeout=15,
+                        )
+                        if _resp.ok:
+                            _total = _resp.json().get("pagination", {}).get("total_entries", "?")
+                            st.success(f"Apollo — connected ({_total:,} results for CEO)")
+                        elif _resp.status_code == 403:
+                            st.warning(
+                                "Apollo — key is valid but people search returned 403. "
+                                "Your plan may not include API search access. "
+                                "Check apollo.io → Settings → API Keys → plan tier."
+                            )
+                        else:
+                            st.error(f"Apollo — search error {_resp.status_code}")
+                            st.code(_resp.text[:300])
                 except Exception as _e:
                     st.error(f"Apollo — request failed: {_e}")
 

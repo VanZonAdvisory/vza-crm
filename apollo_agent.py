@@ -43,23 +43,21 @@ def search_apollo(
     if not api_key:
         raise EnvironmentError("APOLLO_API_KEY is not set.")
 
-    # Apollo expects array parameters as repeated query params: person_titles[]=X&person_titles[]=Y
-    params = []
-    for title in titles:
-        params.append(("person_titles[]", title))
-    for location in locations:
-        params.append(("person_locations[]", location))
-    for industry in industries:
-        params.append(("q_organization_keyword_tags[]", industry))
-    params.append(("organization_num_employees_ranges[]", "50,500"))
-    params.append(("page", page))
-    params.append(("per_page", per_page))
-
     headers = {
-        "x-api-key": api_key,
-        "accept": "application/json",
+        "X-Api-Key": api_key,
+        "Content-Type": "application/json",
+        "Cache-Control": "no-cache",
     }
-    response = requests.post(APOLLO_SEARCH_URL, params=params, headers=headers, timeout=30)
+    body = {
+        "person_titles":                   titles,
+        "person_locations":                locations,
+        "q_organization_keyword_tags":     industries,
+        "organization_num_employees_ranges": ["50,500"],
+        "contact_email_status":            ["verified"],
+        "page":                            page,
+        "per_page":                        per_page,
+    }
+    response = requests.post(APOLLO_SEARCH_URL, headers=headers, json=body, timeout=30)
 
     if response.status_code in (401, 403):
         raise PermissionError(f"Apollo access denied ({response.status_code}): {response.text}")
