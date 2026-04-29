@@ -65,13 +65,183 @@ def _get_anthropic_api_key() -> str:
     return os.getenv("ANTHROPIC_API_KEY", "")
 
 
+def _parse_deterministic(text: str) -> dict:
+    """
+    Deterministic parser for LinkedIn "Save to PDF" exports.
+
+    LinkedIn PDFs exported via "Save to PDF" always start with this fixed header
+    (pdfplumber extracts lines roughly in reading order for single-column PDFs,
+    but two-column layouts interleave — hence we scan all lines, not just the top):
+
+        Contactgegevens [Full Name]   ← or just the name on line 1
+        email@example.com
+        Job Title at/bij Company Name
+        www.linkedin.com/in/...       ← skip
+        City, Province, Country
+
+    Strategy:
+      1. Regex-extract email and phone from ALL lines first (unambiguous).
+      2. Line 1 (stripped of "Contactgegevens ") → name.
+      3. Scan lines for "X at Y" / "X bij Y" → title + company.
+      4. Scan for geographic location line (contains comma + known geo keyword,
+         or follows the URL block near the top).
+      5. Fall back to Ervaring section for company if not found yet.
+    """
+    email_re  = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
+    phone_re  = re.compile(r"(\+?31[\s\-]?|0)[\s\-]?(\d[\s\-]?){8,10}")
+    url_re    = re.compile(r"(https?://|www\.)", re.IGNORECASE)
+
+    # Geographic keywords common in Dutch LinkedIn exports
+    GEO_KEYWORDS = (
+        "nederland", "netherlands", "belgium", "belgië", "duitsland", "germany",
+        "noord-brabant", "noord-holland", "zuid-holland", "gelderland", "utrecht",
+        "overijssel", "limburg", "zeeland", "groningen", "friesland", "flevoland",
+        "drenthe", "regio", "gebied", "province", "stad", "gemeente",
+    )
+
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+
+    # ------------------------------------------------------------------ #
+    # 1. Email & phone — scan all lines                                   #
+    # ------------------------------------------------------------------ #
+    email = ""
+    phone = ""
+    for line in lines:
+        if not email:
+            m = email_re.search(line)
+            if m:
+                email = m.group()
+        if not phone:
+            m = phone_re.search(line)
+            if m:
+                phone = re.sub(r"[\s\-]", "", m.group())
+
+    # ------------------------------------------------------------------ #
+    # 2. Name — first content line, strip "Contactgegevens " prefix       #
+    # ------------------------------------------------------------------ #
+    name = ""
+    name_idx = 0
+    CONTACT_PREFIX = "contactgegevens "
+    SKIP_HEADERS = {
+        "contactgegevens", "contact details", "profiel", "profile",
+        "samenvatting", "summary", "about",
+    }
+    for i, line in enumerate(lines):
+        lower = line.lower()
+        # Skip pure section headers, URLs, and email lines
+        if lower in SKIP_HEADERS:
+            continue
+        if url_re.search(line) or "linkedin.com" in lower:
+            continue
+        if email_re.fullmatch(line):
+            continue
+        # Strip "Contactgegevens " prefix if present
+        if lower.startswith(CONTACT_PREFIX):
+            line = line[len(CONTACT_PREFIX):].strip()
+        if line:
+            name = line
+            name_idx = i
+            break
+
+    # ------------------------------------------------------------------ #
+    # 3. Title + company — find "X at Y" or "X bij Y" line               #
+    # ------------------------------------------------------------------ #
+    title   = ""
+    company = ""
+    AT_PATTERNS = re.compile(r"\s+(?:at|bij|@)\s+", re.IGNORECASE)
+
+    # Only look in the first 25 lines to avoid picking up experience entries
+    for line in lines[:25]:
+        lower = line.lower()
+        if url_re.search(line) or "linkedin.com" in lower:
+            continue
+        if email_re.search(line):
+            continue
+        m = AT_PATTERNS.search(line)
+        if m:
+            title   = line[:m.start()].strip()
+            company = line[m.end():].strip()
+            break
+
+    # ------------------------------------------------------------------ #
+    # 4. Location — line with geo keyword OR comma-separated near top     #
+    # ------------------------------------------------------------------ #
+    location = ""
+    for line in lines[name_idx + 1: name_idx + 15]:
+        lower = line.lower()
+        if url_re.search(line) or "linkedin.com" in lower:
+            continue
+        if email_re.search(line):
+            continue
+        if line == title or line == company or line == name:
+            continue
+        # Candidate: contains a geographic keyword
+        if any(kw in lower for kw in GEO_KEYWORDS):
+            location = line
+            break
+        # Candidate: two or more comma-separated parts (city, country)
+        parts = [p.strip() for p in line.split(",") if p.strip()]
+        if len(parts) >= 2 and len(line) < 80:
+            location = line
+            break
+
+    # ------------------------------------------------------------------ #
+    # 5. Company fallback — first real line under "Ervaring" section      #
+    # ------------------------------------------------------------------ #
+    EXPERIENCE_HEADERS = {"experience", "werkervaring", "ervaring"}
+    SECTION_HEADERS = {
+        "contactgegevens", "contact", "contact details",
+        "ervaring", "experience", "werkervaring",
+        "opleiding", "education",
+        "vaardigheden", "skills",
+        "belangrijkste vaardigheden", "top skills",
+        "alle vaardigheden weergeven",
+        "aanbevelingen", "recommendations",
+        "certificeringen", "certifications",
+        "vrijwilligerswerk", "volunteering",
+        "talen", "languages",
+        "projecten", "projects",
+        "publicaties", "publications",
+        "interessen", "interests",
+        "activiteiten", "activities",
+        "cursussen", "courses",
+        "organisaties", "organizations",
+        "samenvatting", "summary", "about",
+        "onderscheidingen en prijzen", "honors & awards",
+        "overige activiteiten", "bijdragen",
+    }
+    if not company:
+        for i, line in enumerate(lines):
+            if line.lower() in EXPERIENCE_HEADERS:
+                for candidate in lines[i + 1: i + 15]:
+                    cl = candidate.lower()
+                    if (
+                        len(candidate) > 2
+                        and candidate not in ("·", "-")
+                        and cl not in SECTION_HEADERS
+                        and not email_re.search(candidate)
+                        and not url_re.search(candidate)
+                    ):
+                        company = candidate
+                        break
+                break
+
+    result = {
+        "name":     name,
+        "title":    title,
+        "company":  company,
+        "location": location,
+        "phone":    phone,
+        "email":    email,
+    }
+    logger.info("Deterministic parse result: %s", result)
+    return result
+
+
 def _parse_with_claude(text: str) -> dict:
     """
     Use Claude to extract lead fields from raw LinkedIn PDF text.
-
-    Email and phone are pre-extracted with regex so Claude never sees them
-    in-line and cannot confuse them with title or location.
-    Claude is then only asked for: name, title, company, location.
+    Called only when the deterministic parser cannot find a name or company.
     """
     try:
         import anthropic
@@ -82,9 +252,6 @@ def _parse_with_claude(text: str) -> dict:
     if not api_key:
         raise RuntimeError("ANTHROPIC_API_KEY not configured")
 
-    # ------------------------------------------------------------------
-    # 1. Pre-extract email and phone with regex — unambiguous patterns
-    # ------------------------------------------------------------------
     email_re = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
     phone_re = re.compile(r"(\+?31[\s\-]?|0)[\s\-]?(\d[\s\-]?){8,10}")
 
@@ -93,19 +260,14 @@ def _parse_with_claude(text: str) -> dict:
     cleaned_lines = []
 
     for line in text.splitlines():
-        # Extract email from this line if not yet found
         if not email:
             m = email_re.search(line)
             if m:
                 email = m.group()
-
-        # Extract phone from this line if not yet found
         if not phone:
             m = phone_re.search(line)
             if m:
                 phone = re.sub(r"[\s\-]", "", m.group())
-
-        # Remove lines that are purely an email/URL/phone to reduce Claude noise
         stripped = line.strip()
         if email_re.fullmatch(stripped):
             continue
@@ -115,9 +277,6 @@ def _parse_with_claude(text: str) -> dict:
 
     cleaned_text = "\n".join(cleaned_lines)
 
-    # ------------------------------------------------------------------
-    # 2. Ask Claude only for the four fields it can't confuse
-    # ------------------------------------------------------------------
     client = anthropic.Anthropic(api_key=api_key)
 
     prompt = f"""Extract four fields from this LinkedIn profile text.
@@ -389,28 +548,33 @@ def _extract_from_pdf(pdf_path: str) -> dict:
     """
     Extract lead fields from a LinkedIn profile PDF.
 
-    Tries Claude AI first (handles two-column layout correctly).
-    Falls back to regex parsing if the API is unavailable.
+    Parse order:
+      1. Deterministic header parser — handles the fixed LinkedIn PDF structure.
+      2. Claude AI fallback — only used when deterministic parse finds nothing.
     """
     text = _extract_text_from_pdf(pdf_path)
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
 
-    if not lines:
+    if not text.strip():
         raise ValueError(f"Could not extract any text from {pdf_path}")
 
-    # Primary: Claude AI
+    # Primary: deterministic parser
+    fields = _parse_deterministic(text)
+    if fields.get("name") or fields.get("company"):
+        logger.info("Extracted via deterministic parser: %s", fields)
+        return fields
+
+    logger.warning("Deterministic parser returned empty result — falling back to Claude")
+
+    # Fallback: Claude AI
     try:
         fields = _parse_with_claude(text)
         if fields.get("name") or fields.get("company"):
             logger.info("Extracted via Claude: %s", fields)
             return fields
-        logger.warning("Claude returned empty result — falling back to regex")
+        logger.warning("Claude also returned empty result")
     except Exception as exc:
-        logger.warning("Claude extraction failed (%s) — falling back to regex", exc)
+        logger.warning("Claude extraction failed: %s", exc)
 
-    # Fallback: regex / heuristic
-    fields = _parse_profile_lines(lines)
-    logger.info("Extracted via regex: %s", fields)
     return fields
 
 
