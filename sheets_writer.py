@@ -168,27 +168,27 @@ def _is_duplicate(existing_rows: list[dict], row: dict) -> bool:
     """
     Return True if *row* already exists in *existing_rows*.
 
-    Matching priority:
-      1. linkedin_url  (if present and non-empty in the new row)
-      2. Company name + DMU name
+    Two independent checks — either one is sufficient to call it a duplicate:
+      1. LinkedIn URL match (both sides must be non-empty)
+      2. Company name + DMU name match (both fields must be non-empty)
     """
-    linkedin_url = _normalise(row.get("linkedin_url", ""))
+    new_url     = _normalise(row.get("linkedin_url", ""))
+    new_company = _normalise(row.get("Company name", ""))
+    new_dmu     = _normalise(row.get("DMU name", ""))
 
     for existing in existing_rows:
-        if linkedin_url:
-            if _normalise(existing.get("linkedin_url", "")) == linkedin_url:
+        # URL match — only when both sides have a URL
+        if new_url and _normalise(existing.get("linkedin_url", "")) == new_url:
+            return True
+
+        # Company + DMU match — only when both fields are non-empty
+        if new_company and new_dmu:
+            if (
+                _normalise(existing.get("Company name", "")) == new_company
+                and _normalise(existing.get("DMU name", "")) == new_dmu
+            ):
                 return True
-        else:
-            same_company = (
-                _normalise(existing.get("Company name", ""))
-                == _normalise(row.get("Company name", ""))
-            )
-            same_dmu = (
-                _normalise(existing.get("DMU name", ""))
-                == _normalise(row.get("DMU name", ""))
-            )
-            if same_company and same_dmu:
-                return True
+
     return False
 
 
