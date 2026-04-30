@@ -180,25 +180,22 @@ with st.sidebar:
                     elif not _health.ok:
                         st.error(f"Apollo — health check failed ({_health.status_code}): {_health.text[:200]}")
                     else:
-                        # Step 2: people search
-                        _resp = _req.post(
-                            "https://api.apollo.io/api/v1/mixed_people/api_search",
-                            headers=_headers,
-                            json={"person_titles": ["CEO"], "per_page": 1, "page": 1},
-                            timeout=15,
-                        )
-                        if _resp.ok:
-                            _total = _resp.json().get("pagination", {}).get("total_entries", "?")
-                            st.success(f"Apollo — connected ({_total:,} results for CEO)")
-                        elif _resp.status_code == 403:
-                            st.warning(
-                                "Apollo — key is valid but people search returned 403. "
-                                "Your plan may not include API search access. "
-                                "Check apollo.io → Settings → API Keys → plan tier."
-                            )
+                        # Step 2: try both search endpoints
+                        _endpoints = [
+                            ("v1/people/search",              "https://api.apollo.io/v1/people/search"),
+                            ("api/v1/mixed_people/api_search","https://api.apollo.io/api/v1/mixed_people/api_search"),
+                        ]
+                        _body = {"person_titles": ["CEO"], "per_page": 1, "page": 1}
+                        for _ep_name, _ep_url in _endpoints:
+                            _resp = _req.post(_ep_url, headers=_headers, json=_body, timeout=15)
+                            if _resp.ok:
+                                _total = _resp.json().get("pagination", {}).get("total_entries", "?")
+                                st.success(f"Apollo — connected via **{_ep_name}** ({_total:,} results for CEO)")
+                                break
+                            else:
+                                st.warning(f"{_ep_name} → {_resp.status_code}")
                         else:
-                            st.error(f"Apollo — search error {_resp.status_code}")
-                            st.code(_resp.text[:300])
+                            st.error("Apollo — both search endpoints returned errors. Check plan tier.")
                 except Exception as _e:
                     st.error(f"Apollo — request failed: {_e}")
 
