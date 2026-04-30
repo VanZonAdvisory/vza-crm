@@ -49,6 +49,7 @@ def search_apollo(
         "Cache-Control": "no-cache",
     }
     body = {
+        "api_key":                         api_key,
         "person_titles":                   titles,
         "person_locations":                locations,
         "q_organization_keyword_tags":     industries,

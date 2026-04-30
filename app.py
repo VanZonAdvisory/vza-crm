@@ -180,12 +180,12 @@ with st.sidebar:
                     elif not _health.ok:
                         st.error(f"Apollo — health check failed ({_health.status_code}): {_health.text[:200]}")
                     else:
-                        # Step 2: try both search endpoints
+                        # Step 2: try both endpoints, key in header AND body
                         _endpoints = [
-                            ("v1/people/search",              "https://api.apollo.io/v1/people/search"),
-                            ("api/v1/mixed_people/api_search","https://api.apollo.io/api/v1/mixed_people/api_search"),
+                            ("v1/people/search",               "https://api.apollo.io/v1/people/search"),
+                            ("api/v1/mixed_people/api_search", "https://api.apollo.io/api/v1/mixed_people/api_search"),
                         ]
-                        _body = {"person_titles": ["CEO"], "per_page": 1, "page": 1}
+                        _body = {"api_key": _key, "person_titles": ["CEO"], "per_page": 1, "page": 1}
                         for _ep_name, _ep_url in _endpoints:
                             _resp = _req.post(_ep_url, headers=_headers, json=_body, timeout=15)
                             if _resp.ok:
@@ -193,9 +193,9 @@ with st.sidebar:
                                 st.success(f"Apollo — connected via **{_ep_name}** ({_total:,} results for CEO)")
                                 break
                             else:
-                                st.warning(f"{_ep_name} → {_resp.status_code}")
+                                st.warning(f"{_ep_name} → {_resp.status_code}: {_resp.text[:120]}")
                         else:
-                            st.error("Apollo — both search endpoints returned errors. Check plan tier.")
+                            st.error("Apollo — both endpoints returned errors (see warnings above).")
                 except Exception as _e:
                     st.error(f"Apollo — request failed: {_e}")
 
