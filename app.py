@@ -432,7 +432,7 @@ with tab_apollo_csv:
                 "DMU mail":          rec.get("Email",          ""),
                 "expected desire":   "",
                 "comp. phone":       _clean(rec.get("Company Phone", "")),
-                "comp. mail":        rec.get("Website",        ""),
+                "comp. mail":        "",
                 "notes":             "",
                 "owner":             rec.get("Contact Owner",  ""),
                 "last tried call":   "",
