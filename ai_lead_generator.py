@@ -142,10 +142,10 @@ def _map_to_sheet_row(raw: dict) -> dict:
         "owner": "",
         "last tried call": "",
         "last spoken": "",
-        "notes2": "",
-        "sourced": "AI leadlist",
-        "phase": "Attention (lead)",
-        "Rejected (reason)": "",
+        "contact notes": "",
+        "source": "AI leadlist",
+        "phase": "",
+        "Rejected": "",
     }
 
 

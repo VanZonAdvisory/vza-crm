@@ -34,7 +34,9 @@ def search_apollo(
     titles: list[str],
     industries: list[str],
     locations: list[str],
-    per_page: int = 10,
+    seniorities: list[str] | None = None,
+    employee_ranges: list[str] | None = None,
+    per_page: int = 25,
     page: int = 1,
     api_key: str = "",
 ) -> dict:
@@ -48,16 +50,22 @@ def search_apollo(
         "Content-Type": "application/json",
         "Cache-Control": "no-cache",
     }
-    body = {
-        "api_key":                         api_key,
-        "person_titles":                   titles,
-        "person_locations":                locations,
-        "q_organization_keyword_tags":     industries,
-        "organization_num_employees_ranges": ["50,500"],
-        "contact_email_status":            ["verified"],
-        "page":                            page,
-        "per_page":                        per_page,
+    body: dict = {
+        "api_key":                           api_key,
+        "contact_email_status":              ["verified"],
+        "organization_locations":            locations,
+        "page":                              page,
+        "per_page":                          per_page,
     }
+    if titles:
+        body["person_titles"] = titles
+    if industries:
+        body["q_organization_keyword_tags"] = industries
+    if seniorities:
+        body["person_seniorities"] = seniorities
+    if employee_ranges:
+        body["organization_num_employees_ranges"] = employee_ranges
+
     response = requests.post(APOLLO_SEARCH_URL, headers=headers, json=body, timeout=30)
 
     if response.status_code in (401, 403):
@@ -130,19 +138,19 @@ def _map_to_sheet_row(person: dict) -> dict:
         "owner":                "",
         "last tried call":      "",
         "last spoken":          "",
-        "notes2":               "",
-        "sourced":              "Apollo",
+        "contact notes":        "",
+        "source":               "Apollo",
         "phase":                "",
-        "Rejected (reason)":    "",
-        "DMU LI URL":     dmu_linkedin,
-        "comp. LI URL": company_linkedin,
-        "Website":              company_website,
-        "# Employees":          employees,
-        "Annual Revenue":       revenue,
-        "Seniority":            seniority,
-        "Department":           departments,
-        "Apollo Contact ID":    apollo_id,
-        "Email Status":         email_status,
+        "Rejected":             "",
+        "DMU LI URL":           dmu_linkedin,
+        "comp. LI URL":         company_linkedin,
+        "website":              company_website,
+        "# employees":          employees,
+        "annual revenue":       revenue,
+        "seniority":            seniority,
+        "department":           departments,
+        "Apollo contact ID":    apollo_id,
+        "email status":         email_status,
         # Deduplication key — not written as a column
         "linkedin_url":         dmu_linkedin,
     }

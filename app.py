@@ -223,11 +223,11 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
-tab_linkedin, tab_apollo, tab_apollo_csv, tab_ai = st.tabs([
+tab_linkedin, tab_apollo, tab_apollo_csv, tab_enrich = st.tabs([
     "🔗  LinkedIn Profile",
     "🔍  Apollo Search",
     "📄  Apollo CSV",
-    "🤖  AI Company Discovery",
+    "✨  Enrich Leads",
 ])
 
 
@@ -294,7 +294,7 @@ with tab_linkedin:
 # ===========================================================================
 with tab_apollo:
     st.markdown("#### Search Apollo for verified contacts")
-    st.caption("Apollo returns real, verified contacts. Requires an active Apollo paid plan.")
+    st.caption("Fixed filters: verified email, Netherlands. Variable filters below.")
 
     apollo_key = os.getenv("APOLLO_API_KEY", "") or st.secrets.get("APOLLO_API_KEY", "")
     if not apollo_key:
@@ -310,10 +310,22 @@ with tab_apollo:
                 value=", ".join(ICP["target_titles"]),
                 help="e.g. Directeur, Operations Manager, CFO, Plant Manager",
             )
-            locations_input = st.text_input(
-                "Regions (comma-separated)",
-                value=", ".join(ICP["region"]),
-                help="e.g. Oost-Brabant, Eindhoven, Noord-Brabant",
+            seniority_options = ["c_suite", "vp", "director", "manager", "owner", "founder", "senior"]
+            seniority_sel = st.multiselect(
+                "Seniority",
+                options=seniority_options,
+                default=["c_suite", "owner", "founder"],
+            )
+            size_options = {
+                "50–200":   "50,200",
+                "201–500":  "201,500",
+                "501–1000": "501,1000",
+                "1001–5000":"1001,5000",
+            }
+            size_sel = st.multiselect(
+                "Company size (employees)",
+                options=list(size_options.keys()),
+                default=["50–200", "201–500"],
             )
         with col2:
             industries_input = st.text_input(
@@ -321,24 +333,29 @@ with tab_apollo:
                 value=", ".join(ICP["industry"]),
                 help="e.g. logistics, manufacturing, supply chain",
             )
+            locations_input = st.text_input(
+                "Company locations (comma-separated)",
+                value="Netherlands",
+                help="e.g. Eindhoven, Noord-Brabant, Netherlands",
+            )
             col2a, col2b = st.columns(2)
-            pages    = col2a.number_input("Pages", min_value=1, max_value=10, value=1)
-            per_page = col2b.number_input("Per page", min_value=5, max_value=25, value=10)
+            per_page = col2a.number_input("Results", min_value=5, max_value=100, value=25)
+            pages    = col2b.number_input("Pages",   min_value=1, max_value=10,  value=1)
 
     if st.button("Search Apollo", type="primary", key="btn_apollo"):
         titles     = [t.strip() for t in titles_input.split(",")     if t.strip()]
         locations  = [l.strip() for l in locations_input.split(",")  if l.strip()]
         industries = [i.strip() for i in industries_input.split(",") if i.strip()]
+        sizes      = [size_options[s] for s in size_sel if s in size_options]
 
         if not apollo_key:
             st.error("Apollo API key not configured.")
-        elif not titles or not locations or not industries:
-            st.error("Fill in all filter fields.")
+        elif not titles:
+            st.error("Enter at least one job title.")
         else:
             from apollo_agent import search_apollo, _map_to_sheet_row
             from sheets_writer import append_lead
 
-            written = skipped = errors = 0
             all_people = []
             progress = st.progress(0, text="Contacting Apollo…")
 
@@ -348,35 +365,67 @@ with tab_apollo:
                     text=f"Fetching page {page} of {int(pages)}…",
                 )
                 try:
-                    data   = search_apollo(titles, industries, locations,
-                                           per_page=int(per_page), page=page,
-                                           api_key=apollo_key)
+                    data = search_apollo(
+                        titles=titles,
+                        industries=industries,
+                        locations=locations,
+                        seniorities=seniority_sel,
+                        employee_ranges=sizes,
+                        per_page=int(per_page),
+                        page=page,
+                        api_key=apollo_key,
+                    )
                     people = data.get("people") or []
                     all_people.extend(people)
+                    if not people:
+                        break
                 except Exception as exc:
                     st.error(f"Apollo error: {exc}")
                     break
 
-            progress.progress(100, text="Writing to CRM…")
-            for person in all_people:
-                row = _map_to_sheet_row(person)
-                if not row["Company name"] and not row["DMU name"]:
-                    continue
-                try:
-                    if append_lead(row):
-                        written += 1
-                    else:
-                        skipped += 1
-                except Exception as exc:
-                    st.error(f"Write error: {exc}")
-                    errors += 1
-
             progress.empty()
-            st.success(
-                f"✅ Done — **{written}** new lead(s) written, "
-                f"**{skipped}** duplicate(s) skipped"
-                + (f", {errors} error(s)" if errors else "") + "."
-            )
+
+            if all_people:
+                total_found = data.get("pagination", {}).get("total_entries", len(all_people))
+                st.info(f"Found **{total_found:,}** total matches — fetched **{len(all_people)}**.")
+
+                # Preview
+                preview = []
+                for p in all_people[:10]:
+                    org = p.get("organization") or {}
+                    preview.append({
+                        "Name":    f"{p.get('first_name','')} {p.get('last_name','')}".strip(),
+                        "Title":   p.get("title", "—"),
+                        "Company": org.get("name", "—"),
+                        "Email":   p.get("email", "—") or "—",
+                        "Location": org.get("city", "—"),
+                    })
+                st.table(preview)
+
+                if st.button("Write all to CRM", type="primary", key="btn_apollo_write"):
+                    written = skipped = errors = 0
+                    bar = st.progress(0, text="Writing to Google Sheets…")
+                    for i, person in enumerate(all_people):
+                        bar.progress(int((i + 1) / len(all_people) * 100))
+                        row = _map_to_sheet_row(person)
+                        if not row["Company name"] and not row["DMU name"]:
+                            continue
+                        try:
+                            if append_lead(row):
+                                written += 1
+                            else:
+                                skipped += 1
+                        except Exception as exc:
+                            st.error(f"Write error: {exc}")
+                            errors += 1
+                    bar.empty()
+                    st.success(
+                        f"✅ Done — **{written}** new lead(s) written, "
+                        f"**{skipped}** duplicate(s) skipped"
+                        + (f", {errors} error(s)" if errors else "") + "."
+                    )
+            else:
+                st.warning("No results returned. Try broadening your filters.")
 
 
 # ===========================================================================
@@ -439,19 +488,19 @@ with tab_apollo_csv:
                 "owner":             rec.get("Contact Owner",  ""),
                 "last tried call":   "",
                 "last spoken":       "",
-                "notes2":            "",
-                "sourced":           "Apollo",
+                "contact notes":     "",
+                "source":            "Apollo",
                 "phase":             "",
-                "Rejected (reason)": "",
-                "DMU LI URL":  dmu_linkedin,
-                "comp. LI URL": rec.get("Company Linkedin Url", ""),
-                "Website":           rec.get("Website",        ""),
-                "# Employees":       rec.get("# Employees",   ""),
-                "Annual Revenue":    rec.get("Annual Revenue", ""),
-                "Seniority":         rec.get("Seniority",      ""),
-                "Department":        rec.get("Departments",    ""),
-                "Apollo Contact ID": rec.get("Apollo Contact Id", ""),
-                "Email Status":      rec.get("Email Status",  ""),
+                "Rejected":          "",
+                "DMU LI URL":        dmu_linkedin,
+                "comp. LI URL":      rec.get("Company Linkedin Url", ""),
+                "website":           rec.get("Website",        ""),
+                "# employees":       rec.get("# Employees",   ""),
+                "annual revenue":    rec.get("Annual Revenue", ""),
+                "seniority":         rec.get("Seniority",      ""),
+                "department":        rec.get("Departments",    ""),
+                "Apollo contact ID": rec.get("Apollo Contact Id", ""),
+                "email status":      rec.get("Email Status",  ""),
                 # Deduplication key — not written as a column
                 "linkedin_url":      dmu_linkedin,
             })
@@ -541,87 +590,121 @@ with tab_apollo_csv:
 
 
 # ===========================================================================
-# TAB 4 — AI Company Discovery
+# TAB 4 — Enrich Leads
 # ===========================================================================
-with tab_ai:
-    st.markdown("#### Discover companies with Claude AI")
+with tab_enrich:
+    st.markdown("#### Enrich existing leads via Apollo")
     st.caption(
-        "Claude identifies real companies matching your ICP — industry, region, and size. "
-        "**No personal contacts are generated.** Use Apollo or LinkedIn to find DMUs afterwards."
+        "Reads leads from the CRM that are missing data, looks them up in Apollo "
+        "by email or LinkedIn URL, and fills in the blanks."
     )
 
-    anthropic_key = os.getenv("ANTHROPIC_API_KEY", "") or st.secrets.get("ANTHROPIC_API_KEY", "")
-    if not anthropic_key:
-        st.warning("Anthropic API key not configured. Add `ANTHROPIC_API_KEY` to Streamlit secrets.")
-
-    from config import ICP as _ICP
+    _apollo_key = os.getenv("APOLLO_API_KEY", "") or st.secrets.get("APOLLO_API_KEY", "")
+    if not _apollo_key:
+        st.warning("Apollo API key not configured. Add `APOLLO_API_KEY` to Streamlit secrets.")
 
     with st.container(border=True):
-        col1, col2 = st.columns(2)
-        with col1:
-            ai_industry = st.text_input(
-                "Industries (comma-separated)",
-                value=", ".join(_ICP["industry"]),
-                key="ai_industry",
-            )
-            ai_region = st.text_input(
-                "Regions (comma-separated)",
-                value=", ".join(_ICP["region"]),
-                key="ai_region",
-            )
-        with col2:
-            ai_size = st.text_input(
-                "Company size",
-                value=_ICP["company_size"],
-                key="ai_size",
-            )
-            ai_count = st.number_input(
-                "Number of companies",
-                min_value=5, max_value=25, value=10,
-                key="ai_count",
-            )
+        enrich_field = st.radio(
+            "Match leads on",
+            ["Email", "LinkedIn URL"],
+            horizontal=True,
+            help="Apollo uses this field to find the contact record.",
+        )
+        enrich_limit = st.number_input(
+            "Max leads to enrich per run",
+            min_value=1, max_value=50, value=10,
+            help="Apollo enrichment uses 1 credit per contact.",
+        )
 
-    if st.button("Discover companies", type="primary", key="btn_ai"):
-        if not anthropic_key:
-            st.error("Anthropic API key not configured.")
-        elif not ai_industry or not ai_region:
-            st.error("Fill in industry and region.")
+    if st.button("Enrich leads", type="primary", key="btn_enrich"):
+        if not _apollo_key:
+            st.error("Apollo API key not configured.")
         else:
-            from ai_lead_generator import generate_company_leads, _map_company_to_sheet_row
-            from sheets_writer import append_lead
+            import requests as _req
+            from sheets_writer import _get_sheet, _normalise
 
-            industries = [i.strip() for i in ai_industry.split(",") if i.strip()]
-            regions    = [r.strip() for r in ai_region.split(",")    if r.strip()]
+            with st.spinner("Reading CRM…"):
+                _sheet = _get_sheet()
+                _all   = _sheet.get_all_values()
 
-            with st.spinner("Asking Claude to identify companies…"):
-                try:
-                    raw_leads = generate_company_leads(
-                        industry=industries,
-                        region=regions,
-                        size=ai_size,
-                        count=int(ai_count),
-                    )
-                except Exception as exc:
-                    st.error(f"Claude error: {exc}")
-                    raw_leads = []
+            if len(_all) < 2:
+                st.warning("No leads found in the CRM.")
+            else:
+                _headers = _all[0]
+                _rows    = [dict(zip(_headers, r)) for r in _all[1:]]
 
-            if raw_leads:
-                written = skipped = 0
-                with st.spinner("Writing to CRM…"):
-                    for raw in raw_leads:
-                        if not isinstance(raw, dict):
-                            continue
-                        row = _map_company_to_sheet_row(raw)
+                # Find rows missing key fields
+                _match_col = "DMU mail" if enrich_field == "Email" else "DMU LI URL"
+                _candidates = [
+                    (i + 2, r) for i, r in enumerate(_rows)
+                    if r.get(_match_col, "").strip()
+                    and not r.get("DMU phone", "").strip()
+                ][:int(enrich_limit)]
+
+                if not _candidates:
+                    st.info("No leads need enrichment (all already have a phone, or no match field found).")
+                else:
+                    st.info(f"Enriching **{len(_candidates)}** lead(s)…")
+                    _hdrs = {
+                        "X-Api-Key": _apollo_key,
+                        "Content-Type": "application/json",
+                        "Cache-Control": "no-cache",
+                    }
+                    enriched = skipped_e = errors_e = 0
+                    bar = st.progress(0)
+
+                    for idx, (sheet_row, lead) in enumerate(_candidates):
+                        bar.progress(int((idx + 1) / len(_candidates) * 100))
+                        body: dict = {"api_key": _apollo_key, "reveal_personal_emails": True}
+                        if enrich_field == "Email":
+                            body["email"] = lead[_match_col]
+                        else:
+                            body["linkedin_url"] = lead[_match_col]
+
                         try:
-                            if append_lead(row):
-                                written += 1
-                            else:
-                                skipped += 1
-                        except Exception as exc:
-                            st.error(f"Write error: {exc}")
+                            _r = _req.post(
+                                "https://api.apollo.io/v1/people/match",
+                                headers=_hdrs, json=body, timeout=15,
+                            )
+                            if not _r.ok:
+                                errors_e += 1
+                                continue
+                            _person = _r.json().get("person") or {}
+                            if not _person:
+                                skipped_e += 1
+                                continue
 
-                st.success(
-                    f"✅ Done — **{written}** company lead(s) written, "
-                    f"**{skipped}** duplicate(s) skipped."
-                )
-                st.info("💡 Next step: use Apollo Search or LinkedIn to find DMU contacts at these companies.")
+                            # Build update values for the columns we want to fill
+                            _phone_nums = _person.get("phone_numbers") or []
+                            _phone = (_phone_nums[0].get("sanitized_number") if _phone_nums else "") or ""
+                            _updates = {
+                                "DMU phone":    _phone or lead.get("DMU phone", ""),
+                                "seniority":    _person.get("seniority", "") or lead.get("seniority", ""),
+                                "department":   ", ".join(_person.get("departments") or []) or lead.get("department", ""),
+                                "email status": _person.get("email_status", "") or lead.get("email status", ""),
+                                "DMU LI URL":   _person.get("linkedin_url", "") or lead.get("DMU LI URL", ""),
+                            }
+                            org = _person.get("organization") or {}
+                            _updates["# employees"] = str(org.get("estimated_num_employees", "") or lead.get("# employees", ""))
+                            _updates["annual revenue"] = str(org.get("annual_revenue", "") or lead.get("annual revenue", ""))
+                            _updates["website"]       = org.get("website_url", "") or lead.get("website", "")
+                            _updates["comp. LI URL"]  = org.get("linkedin_url", "") or lead.get("comp. LI URL", "")
+
+                            # Write back only changed cells
+                            from config import SHEET_COLUMNS as _COLS
+                            for col_name, new_val in _updates.items():
+                                if col_name in _COLS and new_val and not lead.get(col_name, "").strip():
+                                    col_idx = _COLS.index(col_name) + 1  # 1-based
+                                    _sheet.update_cell(sheet_row, col_idx, new_val)
+
+                            enriched += 1
+                        except Exception as _e:
+                            st.warning(f"Row {sheet_row}: {_e}")
+                            errors_e += 1
+
+                    bar.empty()
+                    st.success(
+                        f"✅ Done — **{enriched}** lead(s) enriched, "
+                        f"**{skipped_e}** not found in Apollo"
+                        + (f", {errors_e} error(s)" if errors_e else "") + "."
+                    )
