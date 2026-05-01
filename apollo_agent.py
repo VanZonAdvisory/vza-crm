@@ -208,21 +208,18 @@ def enrich_company(name: str = "", website: str = "", api_key: str = "") -> dict
     """
     Call Apollo /v1/organizations/enrich for a company.
     Returns the 'organization' dict (empty dict if not found).
-    Prefers domain match over name match.
+    Requires a website/domain — returns empty dict when none is available
+    (Apollo does not support name-only lookup on this endpoint).
     """
+    if not website:
+        return {}
+
     if not api_key:
         api_key = os.getenv("APOLLO_API_KEY", "")
 
+    domain = website.replace("https://", "").replace("http://", "").split("/")[0]
     hdrs = {**_APOLLO_HEADERS, "X-Api-Key": api_key}
-    body: dict = {"api_key": api_key}
-
-    if website:
-        domain = website.replace("https://", "").replace("http://", "").split("/")[0]
-        body["domain"] = domain
-    elif name:
-        body["name"] = name
-    else:
-        return {}
+    body: dict = {"api_key": api_key, "domain": domain}
 
     resp = requests.post("https://api.apollo.io/v1/organizations/enrich", headers=hdrs, json=body, timeout=20)
     if resp.status_code == 422:
