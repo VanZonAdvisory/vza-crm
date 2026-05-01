@@ -289,139 +289,7 @@ with tab_linkedin:
 # ===========================================================================
 with tab_apollo:
     st.markdown("#### Search Apollo for verified contacts")
-    st.caption("Fixed filters: verified email, Netherlands. Variable filters below.")
-
-    apollo_key = os.getenv("APOLLO_API_KEY", "") or st.secrets.get("APOLLO_API_KEY", "")
-    if not apollo_key:
-        st.warning("Apollo API key not configured. Add `APOLLO_API_KEY` to Streamlit secrets.")
-
-    from config import ICP
-
-    with st.container(border=True):
-        col1, col2 = st.columns(2)
-        with col1:
-            titles_input = st.text_input(
-                "Job titles (comma-separated)",
-                value=", ".join(ICP["target_titles"]),
-                help="e.g. Directeur, Operations Manager, CFO, Plant Manager",
-            )
-            seniority_options = ["c_suite", "vp", "director", "manager", "owner", "founder", "senior"]
-            seniority_sel = st.multiselect(
-                "Seniority",
-                options=seniority_options,
-                default=["c_suite", "owner", "founder"],
-            )
-            size_options = {
-                "50–200":   "50,200",
-                "201–500":  "201,500",
-                "501–1000": "501,1000",
-                "1001–5000":"1001,5000",
-            }
-            size_sel = st.multiselect(
-                "Company size (employees)",
-                options=list(size_options.keys()),
-                default=["50–200", "201–500"],
-            )
-        with col2:
-            industries_input = st.text_input(
-                "Industries (comma-separated)",
-                value=", ".join(ICP["industry"]),
-                help="e.g. logistics, manufacturing, supply chain",
-            )
-            locations_input = st.text_input(
-                "Company locations (comma-separated)",
-                value="Netherlands",
-                help="e.g. Eindhoven, Noord-Brabant, Netherlands",
-            )
-            col2a, col2b = st.columns(2)
-            per_page = col2a.number_input("Results", min_value=5, max_value=100, value=25)
-            pages    = col2b.number_input("Pages",   min_value=1, max_value=10,  value=1)
-
-    if st.button("Search Apollo", type="primary", key="btn_apollo"):
-        titles     = [t.strip() for t in titles_input.split(",")     if t.strip()]
-        locations  = [l.strip() for l in locations_input.split(",")  if l.strip()]
-        industries = [i.strip() for i in industries_input.split(",") if i.strip()]
-        sizes      = [size_options[s] for s in size_sel if s in size_options]
-
-        if not apollo_key:
-            st.error("Apollo API key not configured.")
-        elif not titles:
-            st.error("Enter at least one job title.")
-        else:
-            from apollo_agent import search_apollo, _map_to_sheet_row
-            from sheets_writer import append_lead
-
-            all_people = []
-            progress = st.progress(0, text="Contacting Apollo…")
-
-            for page in range(1, int(pages) + 1):
-                progress.progress(
-                    int((page - 1) / pages * 100),
-                    text=f"Fetching page {page} of {int(pages)}…",
-                )
-                try:
-                    data = search_apollo(
-                        titles=titles,
-                        industries=industries,
-                        locations=locations,
-                        seniorities=seniority_sel,
-                        employee_ranges=sizes,
-                        per_page=int(per_page),
-                        page=page,
-                        api_key=apollo_key,
-                    )
-                    people = data.get("people") or []
-                    all_people.extend(people)
-                    if not people:
-                        break
-                except Exception as exc:
-                    st.error(f"Apollo error (page {page}):")
-                    st.code(str(exc))
-                    break
-
-            progress.empty()
-
-            if all_people:
-                total_found = data.get("pagination", {}).get("total_entries", len(all_people))
-                st.info(f"Found **{total_found:,}** total matches — fetched **{len(all_people)}**.")
-
-                # Preview
-                preview = []
-                for p in all_people[:10]:
-                    org = p.get("organization") or {}
-                    preview.append({
-                        "Name":    f"{p.get('first_name','')} {p.get('last_name','')}".strip(),
-                        "Title":   p.get("title", "—"),
-                        "Company": org.get("name", "—"),
-                        "Email":   p.get("email", "—") or "—",
-                        "Location": org.get("city", "—"),
-                    })
-                st.table(preview)
-
-                if st.button("Write all to CRM", type="primary", key="btn_apollo_write"):
-                    written = skipped = errors = 0
-                    bar = st.progress(0, text="Writing to Google Sheets…")
-                    for i, person in enumerate(all_people):
-                        bar.progress(int((i + 1) / len(all_people) * 100))
-                        row = _map_to_sheet_row(person)
-                        if not row["Company name"] and not row["DMU name"]:
-                            continue
-                        try:
-                            if append_lead(row):
-                                written += 1
-                            else:
-                                skipped += 1
-                        except Exception as exc:
-                            st.error(f"Write error: {exc}")
-                            errors += 1
-                    bar.empty()
-                    st.success(
-                        f"✅ Done — **{written}** new lead(s) written, "
-                        f"**{skipped}** duplicate(s) skipped"
-                        + (f", {errors} error(s)" if errors else "") + "."
-                    )
-            else:
-                st.warning("No results returned. Try broadening your filters.")
+    st.warning("🔒 Apollo Search is temporarily unavailable. Use the **Apollo CSV** tab to import contacts in the meantime.")
 
 
 # ===========================================================================
@@ -620,14 +488,18 @@ with tab_enrich:
             st.warning("Sheet is empty.")
         else:
             _hdrs = _all[0]
-            if "enrich?" not in _hdrs:
+            # Case-insensitive match so "Enrich?", "enrich?" etc. all work
+            _ecol = next(
+                (i for i, h in enumerate(_hdrs) if h.strip().lower() == "enrich?"),
+                None,
+            )
+            if _ecol is None:
                 st.error(
                     "Column **enrich?** not found in your Google Sheet.  \n"
-                    "Please add it as the header of **column A** (the very first column). "
-                    "All existing data columns should be shifted one column to the right."
+                    "Please add `enrich?` as the header of **column A**. "
+                    "Check for typos or extra spaces in the header cell."
                 )
             else:
-                _ecol = _hdrs.index("enrich?")
                 _candidates = [
                     (i + 2, dict(zip(_hdrs, row)))
                     for i, row in enumerate(_all[1:])
