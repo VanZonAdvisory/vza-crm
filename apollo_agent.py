@@ -51,12 +51,12 @@ def search_apollo(
         "Cache-Control": "no-cache",
     }
     body: dict = {
-        "api_key":                           api_key,
-        "contact_email_status":              ["verified"],
-        "organization_locations":            locations,
-        "page":                              page,
-        "per_page":                          per_page,
+        "api_key":  api_key,
+        "page":     page,
+        "per_page": per_page,
     }
+    if locations:
+        body["organization_locations"] = locations
     if titles:
         body["person_titles"] = titles
     if industries:
@@ -70,6 +70,8 @@ def search_apollo(
 
     if response.status_code in (401, 403):
         raise PermissionError(f"Apollo access denied ({response.status_code}): {response.text}")
+    if response.status_code == 422:
+        raise ValueError(f"Apollo 422 — invalid parameters.\n\nRequest body: {body}\n\nResponse: {response.text}")
     if response.status_code == 429:
         raise RuntimeError("Apollo rate limit hit — wait a minute and try again.")
     if not response.ok:

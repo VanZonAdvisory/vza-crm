@@ -193,9 +193,10 @@ with st.sidebar:
                                 st.success(f"Apollo — connected via **{_ep_name}** ({_total:,} results for CEO)")
                                 break
                             else:
-                                st.warning(f"{_ep_name} → {_resp.status_code}: {_resp.text[:120]}")
+                                st.warning(f"{_ep_name} → {_resp.status_code}")
+                                st.code(_resp.text[:600])
                         else:
-                            st.error("Apollo — both endpoints returned errors (see warnings above).")
+                            st.error("Apollo — both endpoints returned errors (see details above).")
                 except Exception as _e:
                     st.error(f"Apollo — request failed: {_e}")
 
@@ -380,7 +381,8 @@ with tab_apollo:
                     if not people:
                         break
                 except Exception as exc:
-                    st.error(f"Apollo error: {exc}")
+                    st.error(f"Apollo error (page {page}):")
+                    st.code(str(exc))
                     break
 
             progress.empty()
