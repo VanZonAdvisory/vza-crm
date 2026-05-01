@@ -623,7 +623,8 @@ with tab_enrich:
             if "enrich?" not in _hdrs:
                 st.error(
                     "Column **enrich?** not found in your Google Sheet.  \n"
-                    "Please add it as the last column header (column AB)."
+                    "Please add it as the header of **column A** (the very first column). "
+                    "All existing data columns should be shifted one column to the right."
                 )
             else:
                 _ecol = _hdrs.index("enrich?")
