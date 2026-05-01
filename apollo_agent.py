@@ -24,7 +24,7 @@ from sheets_writer import append_lead
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-APOLLO_SEARCH_URL = "https://api.apollo.io/v1/people/search"
+APOLLO_SEARCH_URL = "https://api.apollo.io/api/v1/mixed_people/api_search"
 
 # ---------------------------------------------------------------------------
 # Apollo search
