@@ -542,29 +542,33 @@ with tab_enrich:
                 from apollo_agent import enrich_person, enrich_company
                 from sheets_writer import _get_sheet as _gs2
 
-                _ws2     = _gs2()
-                _ok      = 0
-                _err     = 0
-                _bar     = st.progress(0)
+                _ws2      = _gs2()
+                _ok       = 0
+                _nothing  = 0
+                _err      = 0
+                _bar      = st.progress(0)
+                _log      = st.empty()
 
                 for _idx, (_sr, _lead) in enumerate(_cands):
-                    _bar.progress(int((_idx + 1) / len(_cands) * 100))
+                    _co_name = _lead.get("Company name", f"row {_sr}")
+                    _bar.progress(int((_idx + 1) / len(_cands) * 100),
+                                  text=f"Processing {_co_name}…")
                     try:
                         _person_data = {}
                         _org_data    = {}
 
-                        # --- Person enrichment ---
+                        # --- Apollo: person ---
                         if _lead.get("DMU name", "").strip():
                             _person_data = enrich_person(
-                                name        = _lead.get("DMU name",   ""),
+                                name        = _lead.get("DMU name",     ""),
                                 company     = _lead.get("Company name", ""),
-                                linkedin_url= _lead.get("DMU LI URL", ""),
-                                email       = _lead.get("DMU mail",   ""),
+                                linkedin_url= _lead.get("DMU LI URL",   ""),
+                                email       = _lead.get("DMU mail",     ""),
                                 api_key     = _apollo_key,
                             )
                             _org_data = _person_data.get("organization") or {}
 
-                        # --- Company enrichment (standalone or supplement) ---
+                        # --- Apollo: company (domain required) ---
                         if not _org_data:
                             _org_data = enrich_company(
                                 name    = _lead.get("Company name", ""),
@@ -572,42 +576,39 @@ with tab_enrich:
                                 api_key = _apollo_key,
                             )
 
-                        # --- Build update map (only empty target cells) ---
+                        # --- Build update map (only fill empty cells) ---
                         _upd: dict[str, str] = {}
 
                         if _person_data:
                             _phones = _person_data.get("phone_numbers") or []
-                            _ph     = (_phones[0].get("sanitized_number") if _phones else "") or ""
-                            if not _lead.get("DMU phone", "").strip() and _ph:
-                                _upd["DMU phone"] = _ph
-                            if not _lead.get("DMU mail", "").strip() and _person_data.get("email"):
-                                _upd["DMU mail"] = _person_data["email"]
-                            if not _lead.get("DMU LI URL", "").strip() and _person_data.get("linkedin_url"):
+                            _ph = (_phones[0].get("sanitized_number") if _phones else "") or ""
+                            if not _lead.get("DMU phone",  "").strip() and _ph:
+                                _upd["DMU phone"]  = _ph
+                            if not _lead.get("DMU mail",   "").strip() and _person_data.get("email"):
+                                _upd["DMU mail"]   = _person_data["email"]
+                            if not _lead.get("DMU LI URL","").strip() and _person_data.get("linkedin_url"):
                                 _upd["DMU LI URL"] = _person_data["linkedin_url"]
 
                         if _org_data:
                             if not _lead.get("comp. phone", "").strip() and _org_data.get("phone"):
                                 _upd["comp. phone"] = _org_data["phone"]
-                            if not _lead.get("comp. LI URL", "").strip() and _org_data.get("linkedin_url"):
-                                _upd["comp. LI URL"] = _org_data["linkedin_url"]
-                            if not _lead.get("website", "").strip() and _org_data.get("website_url"):
-                                _upd["website"] = _org_data["website_url"]
-                            if not _lead.get("# employees", "").strip() and _org_data.get("estimated_num_employees"):
+                            if not _lead.get("comp. LI URL","").strip() and _org_data.get("linkedin_url"):
+                                _upd["comp. LI URL"]= _org_data["linkedin_url"]
+                            if not _lead.get("website",    "").strip() and _org_data.get("website_url"):
+                                _upd["website"]     = _org_data["website_url"]
+                            if not _lead.get("# employees","").strip() and _org_data.get("estimated_num_employees"):
                                 _upd["# employees"] = str(_org_data["estimated_num_employees"])
-                            if not _lead.get("annual revenue", "").strip() and _org_data.get("annual_revenue"):
+                            if not _lead.get("annual revenue","").strip() and _org_data.get("annual_revenue"):
                                 _upd["annual revenue"] = str(_org_data["annual_revenue"])
 
-                        # --- Tavily + Claude fallback for missing company fields ---
-                        if _tavily_key and _ant_key:
+                        # --- Tavily + Claude fallback for still-missing company fields ---
+                        _needs_web = any(
+                            not _lead.get(f, "").strip() and f not in _upd
+                            for f in ["website", "comp. phone", "comp. LI URL", "# employees", "sales notes"]
+                        )
+                        if _tavily_key and _ant_key and _needs_web:
                             _co = _lead.get("Company name", "")
-                            _needs_company = (
-                                not _lead.get("website",      "").strip() or
-                                not _lead.get("comp. phone",  "").strip() or
-                                not _lead.get("comp. LI URL", "").strip() or
-                                not _lead.get("# employees",  "").strip() or
-                                not _lead.get("sales notes",  "").strip()
-                            )
-                            if _co and _needs_company:
+                            if _co:
                                 try:
                                     from tavily import TavilyClient
                                     import anthropic as _ant_mod
@@ -626,54 +627,73 @@ with tab_enrich:
 
                                     if _snip:
                                         _ac  = _ant_mod.Anthropic(api_key=_ant_key)
-                                        _msg = _ac.messages.create(
+                                        _raw = _ac.messages.create(
                                             model="claude-haiku-4-5-20251001",
                                             max_tokens=300,
                                             system=(
-                                                "Extract company information from web snippets and return ONLY a JSON object "
-                                                "with these keys (use empty string if unknown): "
+                                                "Extract company information from web snippets and return ONLY "
+                                                "a valid JSON object with these keys (empty string if unknown): "
                                                 "website, phone, linkedin_url, num_employees, sales_note. "
-                                                "sales_note: one Dutch sentence (max 20 words) on why this company likely "
-                                                "benefits from AI training or process improvement. "
-                                                "Return ONLY the JSON — no markdown, no explanation."
+                                                "sales_note: one Dutch sentence (max 20 words) on why this company "
+                                                "likely benefits from AI training or process improvement. "
+                                                "Return ONLY the JSON — no markdown fences, no explanation."
                                             ),
-                                            messages=[{"role": "user", "content": f"Company: {_co}\nSnippets: {_snip}\nSource URLs: {_urls}"}],
-                                        )
-                                        _extracted = _json.loads(_msg.content[0].text.strip())
+                                            messages=[{"role": "user", "content": f"Company: {_co}\nSnippets: {_snip}\nURLs: {_urls}"}],
+                                        ).content[0].text.strip()
 
-                                        if not _lead.get("website",      "").strip() and _extracted.get("website"):
-                                            _upd["website"]      = _extracted["website"]
-                                        if not _lead.get("comp. phone",  "").strip() and _extracted.get("phone"):
-                                            _upd["comp. phone"]  = _extracted["phone"]
-                                        if not _lead.get("comp. LI URL", "").strip() and _extracted.get("linkedin_url"):
-                                            _upd["comp. LI URL"] = _extracted["linkedin_url"]
-                                        if not _lead.get("# employees",  "").strip() and _extracted.get("num_employees"):
-                                            _upd["# employees"]  = str(_extracted["num_employees"])
-                                        if not _lead.get("sales notes",  "").strip() and _extracted.get("sales_note"):
-                                            _upd["sales notes"]  = _extracted["sales_note"]
-                                except Exception:
-                                    pass  # web enrichment is best-effort
+                                        # Strip accidental markdown fences
+                                        if _raw.startswith("```"):
+                                            _raw = _raw.split("```")[1]
+                                            if _raw.startswith("json"):
+                                                _raw = _raw[4:]
 
-                        # --- Write updates ---
+                                        _ext = _json.loads(_raw)
+
+                                        _web_map = {
+                                            "website":      "website",
+                                            "comp. phone":  "phone",
+                                            "comp. LI URL": "linkedin_url",
+                                            "# employees":  "num_employees",
+                                            "sales notes":  "sales_note",
+                                        }
+                                        for _sheet_col, _ext_key in _web_map.items():
+                                            _val = str(_ext.get(_ext_key, "") or "").strip()
+                                            if _val and not _lead.get(_sheet_col, "").strip() and _sheet_col not in _upd:
+                                                _upd[_sheet_col] = _val
+                                except Exception as _web_err:
+                                    st.caption(f"↳ Web fallback for {_co_name}: {_web_err}")
+
+                        # --- Write to sheet ---
+                        _written_cols = []
                         for _col, _val in _upd.items():
-                            if _col in _hdrs:
-                                _ci = _hdrs.index(_col) + 1  # 1-based
+                            if _col in _hdrs and _val:
+                                _ci = _hdrs.index(_col) + 1
                                 _ws2.update_cell(_sr, _ci, _val)
+                                _written_cols.append(_col)
 
-                        # Clear enrich? flag using the stored column index
+                        # Clear enrich? flag
                         _ws2.update_cell(_sr, _ecol + 1, "")
-                        _ok += 1
+
+                        if _written_cols:
+                            st.caption(f"✅ {_co_name}: filled {', '.join(_written_cols)}")
+                            _ok += 1
+                        else:
+                            st.caption(f"⚠️ {_co_name}: nothing found to fill")
+                            _nothing += 1
 
                     except Exception as _ex:
-                        st.warning(f"Row {_sr} ({_lead.get('Company name', '?')}): {_ex}")
+                        st.warning(f"❌ Row {_sr} ({_co_name}): {_ex}")
                         _err += 1
 
                 _bar.empty()
+                _log.empty()
                 del st.session_state["_enrich_cands"]
                 del st.session_state["_enrich_headers"]
                 del st.session_state["_enrich_ecol"]
 
-                st.success(
-                    f"✅ Done — **{_ok}** lead(s) enriched"
-                    + (f", {_err} error(s)" if _err else "") + "."
-                )
+                _summary = f"**{_ok}** lead(s) enriched"
+                if _nothing:
+                    _summary += f", **{_nothing}** lead(s) — nothing found"
+                if _err:
+                    _summary += f", **{_err}** error(s)"
+                st.success(f"✅ Done — {_summary}.")
