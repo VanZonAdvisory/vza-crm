@@ -407,10 +407,10 @@ with tab_apollo_csv:
             last  = rec.get("Last Name",  "")
             name  = f"{first} {last}".strip()
 
-            # Location — person city/state/country, fall back to company location
-            city    = rec.get("City",    "") or rec.get("Company City",    "")
-            state   = rec.get("State",   "") or rec.get("Company State",   "")
-            country = rec.get("Country", "") or rec.get("Company Country", "")
+            # Location — company city/state/country, fall back to person location
+            city    = rec.get("Company City",    "") or rec.get("City",    "")
+            state   = rec.get("Company State",   "") or rec.get("State",   "")
+            country = rec.get("Company Country", "") or rec.get("Country", "")
             location = ", ".join(p for p in [city, state, country] if p)
 
             # Phone — prefer enriched mobile, then work direct, then corporate
@@ -421,6 +421,8 @@ with tab_apollo_csv:
                 or rec.get("Home Phone",        "")
                 or rec.get("Other Phone",       "")
             )
+
+            dmu_linkedin = rec.get("Person Linkedin Url", "")
 
             rows.append({
                 "Company name":      rec.get("Company Name",   ""),
@@ -441,8 +443,17 @@ with tab_apollo_csv:
                 "sourced":           "Apollo",
                 "phase":             "",
                 "Rejected (reason)": "",
-                # Used for deduplication only — not written as a column
-                "linkedin_url":      rec.get("Person Linkedin Url", ""),
+                "DMU LinkedIn URL":  dmu_linkedin,
+                "Company LinkedIn URL": rec.get("Company Linkedin Url", ""),
+                "Website":           rec.get("Website",        ""),
+                "# Employees":       rec.get("# Employees",   ""),
+                "Annual Revenue":    rec.get("Annual Revenue", ""),
+                "Seniority":         rec.get("Seniority",      ""),
+                "Department":        rec.get("Departments",    ""),
+                "Apollo Contact ID": rec.get("Apollo Contact Id", ""),
+                "Email Status":      rec.get("Email Status",  ""),
+                # Deduplication key — not written as a column
+                "linkedin_url":      dmu_linkedin,
             })
         return rows
 

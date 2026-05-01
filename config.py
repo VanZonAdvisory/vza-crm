@@ -24,6 +24,16 @@ SHEET_COLUMNS = [
     "sourced",
     "phase",
     "Rejected (reason)",
+    # Extended columns
+    "DMU LinkedIn URL",
+    "Company LinkedIn URL",
+    "Website",
+    "# Employees",
+    "Annual Revenue",
+    "Seniority",
+    "Department",
+    "Apollo Contact ID",
+    "Email Status",
 ]
 
 # Ideal Customer Profile (ICP) used by the AI lead generator

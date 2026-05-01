@@ -86,12 +86,11 @@ def _map_to_sheet_row(person: dict) -> dict:
     last   = _safe(person.get("last_name"))
     name   = f"{first} {last}".strip()
 
-    # Location — prefer person location, fall back to org city
-    city    = _safe(person.get("city"))
-    state   = _safe(person.get("state"))
-    country = _safe(person.get("country"))
-    location_parts = [p for p in [city, state, country] if p]
-    location = ", ".join(location_parts)
+    # Location — company HQ city/state/country
+    city    = _safe(org.get("city"))    or _safe(person.get("city"))
+    state   = _safe(org.get("state"))   or _safe(person.get("state"))
+    country = _safe(org.get("country")) or _safe(person.get("country"))
+    location = ", ".join(p for p in [city, state, country] if p)
 
     # Phone — take first available
     phone_numbers = person.get("phone_numbers") or []
@@ -101,35 +100,51 @@ def _map_to_sheet_row(person: dict) -> dict:
     dmu_email = _safe(person.get("email"))
 
     # Company
-    company_name  = _safe(org.get("name"))
-    company_phone = _safe(org.get("phone"))
-    industry      = _safe(org.get("industry"))
-    website       = _safe(org.get("website_url"))
+    company_name    = _safe(org.get("name"))
+    company_phone   = _safe(org.get("phone"))
+    company_website = _safe(org.get("website_url"))
+    industry        = _safe(org.get("industry"))
+    employees       = _safe(org.get("estimated_num_employees"))
+    revenue         = _safe(org.get("annual_revenue"))
+    company_linkedin = _safe(org.get("linkedin_url"))
 
-    # LinkedIn
-    linkedin_url = _safe(person.get("linkedin_url"))
+    # Person
+    dmu_linkedin = _safe(person.get("linkedin_url"))
+    seniority    = _safe(person.get("seniority"))
+    departments  = ", ".join(person.get("departments") or [])
+    apollo_id    = _safe(person.get("id"))
+    email_status = _safe(person.get("email_status"))
 
     return {
-        "Company name":      company_name,
-        "Location":          location,
-        "Industry":          industry,
-        "DMU name":          name,
-        "DMU title":         _safe(person.get("title")),
-        "DMU phone":         dmu_phone,
-        "DMU mail":          dmu_email,
-        "expected desire":   "",
-        "comp. phone":       company_phone,
-        "comp. mail":        website,
-        "notes":             "",
-        "owner":             "",
-        "last tried call":   "",
-        "last spoken":       "",
-        "notes2":            "",
-        "sourced":           "Apollo",
-        "phase":             "",
-        "Rejected (reason)": "",
-        # Used for deduplication only — not written as a column
-        "linkedin_url":      linkedin_url,
+        "Company name":         company_name,
+        "Location":             location,
+        "Industry":             industry,
+        "DMU name":             name,
+        "DMU title":            _safe(person.get("title")),
+        "DMU phone":            dmu_phone,
+        "DMU mail":             dmu_email,
+        "expected desire":      "",
+        "comp. phone":          company_phone,
+        "comp. mail":           "",
+        "notes":                "",
+        "owner":                "",
+        "last tried call":      "",
+        "last spoken":          "",
+        "notes2":               "",
+        "sourced":              "Apollo",
+        "phase":                "",
+        "Rejected (reason)":    "",
+        "DMU LinkedIn URL":     dmu_linkedin,
+        "Company LinkedIn URL": company_linkedin,
+        "Website":              company_website,
+        "# Employees":          employees,
+        "Annual Revenue":       revenue,
+        "Seniority":            seniority,
+        "Department":           departments,
+        "Apollo Contact ID":    apollo_id,
+        "Email Status":         email_status,
+        # Deduplication key — not written as a column
+        "linkedin_url":         dmu_linkedin,
     }
 
 
