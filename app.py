@@ -507,15 +507,17 @@ with tab_enrich:
                 ][:10]
 
                 if not _candidates:
-                    st.info("No rows marked for enrichment. Add **x** to the **enrich?** column in the sheet.")
+                    st.info("No rows marked for enrichment. Add **yes** to the **enrich?** column in the sheet.")
                 else:
-                    st.session_state["_enrich_cands"]  = _candidates
-                    st.session_state["_enrich_headers"] = _hdrs
+                    st.session_state["_enrich_cands"]   = _candidates
+                    st.session_state["_enrich_headers"]  = _hdrs
+                    st.session_state["_enrich_ecol"]     = _ecol
 
     # ---- Preview and confirm ----
     if st.session_state.get("_enrich_cands"):
         _cands  = st.session_state["_enrich_cands"]
         _hdrs   = st.session_state["_enrich_headers"]
+        _ecol   = st.session_state["_enrich_ecol"]
 
         st.markdown(f"**{len(_cands)} lead(s) queued for enrichment:**")
         _preview = []
@@ -595,39 +597,62 @@ with tab_enrich:
                             if not _lead.get("annual revenue", "").strip() and _org_data.get("annual_revenue"):
                                 _upd["annual revenue"] = str(_org_data["annual_revenue"])
 
-                        # --- Sales notes via Tavily + Claude (best-effort) ---
-                        if _tavily_key and _ant_key and not _lead.get("sales notes", "").strip():
-                            try:
-                                from tavily import TavilyClient
-                                import anthropic as _ant_mod
-                                _co = _lead.get("Company name", "")
-                                if _co:
+                        # --- Tavily + Claude fallback for missing company fields ---
+                        if _tavily_key and _ant_key:
+                            _co = _lead.get("Company name", "")
+                            _needs_company = (
+                                not _lead.get("website",      "").strip() or
+                                not _lead.get("comp. phone",  "").strip() or
+                                not _lead.get("comp. LI URL", "").strip() or
+                                not _lead.get("# employees",  "").strip() or
+                                not _lead.get("sales notes",  "").strip()
+                            )
+                            if _co and _needs_company:
+                                try:
+                                    from tavily import TavilyClient
+                                    import anthropic as _ant_mod
+                                    import json as _json
+
                                     _tv   = TavilyClient(api_key=_tavily_key)
                                     _hits = _tv.search(
-                                        f"{_co} uitdagingen AI digitalisering operationeel",
-                                        max_results=3,
+                                        f"{_co} bedrijf website telefoonnummer LinkedIn medewerkers",
+                                        max_results=5,
                                     )
                                     _snip = " ".join(
-                                        r.get("content", "")[:300]
+                                        r.get("content", "")[:400]
                                         for r in _hits.get("results", [])
                                     )
+                                    _urls = [r.get("url", "") for r in _hits.get("results", [])]
+
                                     if _snip:
                                         _ac  = _ant_mod.Anthropic(api_key=_ant_key)
                                         _msg = _ac.messages.create(
                                             model="claude-haiku-4-5-20251001",
-                                            max_tokens=120,
+                                            max_tokens=300,
                                             system=(
-                                                "Schrijf één korte Nederlandse zin (max 20 woorden) over waarom "
-                                                "dit bedrijf waarschijnlijk baat heeft bij AI-training of procesverbetering, "
-                                                "op basis van de aangeleverde websnippets."
+                                                "Extract company information from web snippets and return ONLY a JSON object "
+                                                "with these keys (use empty string if unknown): "
+                                                "website, phone, linkedin_url, num_employees, sales_note. "
+                                                "sales_note: one Dutch sentence (max 20 words) on why this company likely "
+                                                "benefits from AI training or process improvement. "
+                                                "Return ONLY the JSON — no markdown, no explanation."
                                             ),
-                                            messages=[{"role": "user", "content": f"Bedrijf: {_co}\nSnippets: {_snip}"}],
+                                            messages=[{"role": "user", "content": f"Company: {_co}\nSnippets: {_snip}\nSource URLs: {_urls}"}],
                                         )
-                                        _note = _msg.content[0].text.strip()
-                                        if _note:
-                                            _upd["sales notes"] = _note
-                            except Exception:
-                                pass  # sales notes are best-effort
+                                        _extracted = _json.loads(_msg.content[0].text.strip())
+
+                                        if not _lead.get("website",      "").strip() and _extracted.get("website"):
+                                            _upd["website"]      = _extracted["website"]
+                                        if not _lead.get("comp. phone",  "").strip() and _extracted.get("phone"):
+                                            _upd["comp. phone"]  = _extracted["phone"]
+                                        if not _lead.get("comp. LI URL", "").strip() and _extracted.get("linkedin_url"):
+                                            _upd["comp. LI URL"] = _extracted["linkedin_url"]
+                                        if not _lead.get("# employees",  "").strip() and _extracted.get("num_employees"):
+                                            _upd["# employees"]  = str(_extracted["num_employees"])
+                                        if not _lead.get("sales notes",  "").strip() and _extracted.get("sales_note"):
+                                            _upd["sales notes"]  = _extracted["sales_note"]
+                                except Exception:
+                                    pass  # web enrichment is best-effort
 
                         # --- Write updates ---
                         for _col, _val in _upd.items():
@@ -635,8 +660,8 @@ with tab_enrich:
                                 _ci = _hdrs.index(_col) + 1  # 1-based
                                 _ws2.update_cell(_sr, _ci, _val)
 
-                        # Clear enrich? flag
-                        _ws2.update_cell(_sr, _hdrs.index("enrich?") + 1, "")
+                        # Clear enrich? flag using the stored column index
+                        _ws2.update_cell(_sr, _ecol + 1, "")
                         _ok += 1
 
                     except Exception as _ex:
@@ -646,6 +671,7 @@ with tab_enrich:
                 _bar.empty()
                 del st.session_state["_enrich_cands"]
                 del st.session_state["_enrich_headers"]
+                del st.session_state["_enrich_ecol"]
 
                 st.success(
                     f"✅ Done — **{_ok}** lead(s) enriched"
