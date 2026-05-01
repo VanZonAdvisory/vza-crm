@@ -6,6 +6,7 @@ SERVICE_ACCOUNT_JSON = r"D:\vza-crm-agent.json.json"
 
 # Column order must match the Google Sheet exactly
 SHEET_COLUMNS = [
+    "enrich?",
     "Company name",
     "Location",
     "Industry",
@@ -33,7 +34,6 @@ SHEET_COLUMNS = [
     "department",
     "Apollo contact ID",
     "email status",
-    "enrich?",
 ]
 
 # Ideal Customer Profile (ICP) used by the AI lead generator

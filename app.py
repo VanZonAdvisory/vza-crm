@@ -604,8 +604,8 @@ with tab_enrich:
 
     st.info(
         "**How to mark a lead:**  \n"
-        "Open the Google Sheet → find the lead row → type **x** (or any value) in the **enrich?** column.  \n"
-        "The flag is automatically cleared after enrichment.",
+        "Open the Google Sheet → find the lead row → type **yes** in the **enrich?** column (column A).  \n"
+        "The value is reset to a space after enrichment.",
         icon="💡",
     )
 
@@ -762,8 +762,8 @@ with tab_enrich:
                                 _ci = _hdrs.index(_col) + 1  # 1-based
                                 _ws2.update_cell(_sr, _ci, _val)
 
-                        # Clear enrich? flag
-                        _ws2.update_cell(_sr, _hdrs.index("enrich?") + 1, "")
+                        # Reset enrich? to space (not empty)
+                        _ws2.update_cell(_sr, _hdrs.index("enrich?") + 1, " ")
                         _ok += 1
 
                     except Exception as _ex:
