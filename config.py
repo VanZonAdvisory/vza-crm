@@ -33,6 +33,7 @@ SHEET_COLUMNS = [
     "department",
     "Apollo contact ID",
     "email status",
+    "enrich?",
 ]
 
 # Ideal Customer Profile (ICP) used by the AI lead generator

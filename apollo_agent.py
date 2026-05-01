@@ -159,6 +159,80 @@ def _map_to_sheet_row(person: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Enrichment helpers
+# ---------------------------------------------------------------------------
+
+_APOLLO_HEADERS = {
+    "Content-Type": "application/json",
+    "Cache-Control": "no-cache",
+}
+
+
+def enrich_person(
+    name: str = "",
+    company: str = "",
+    linkedin_url: str = "",
+    email: str = "",
+    api_key: str = "",
+) -> dict:
+    """
+    Call Apollo /v1/people/match for a single contact.
+    Returns the 'person' dict (empty dict if not found).
+    Match priority: LinkedIn URL → email → first+last+company name.
+    """
+    if not api_key:
+        api_key = os.getenv("APOLLO_API_KEY", "")
+
+    hdrs = {**_APOLLO_HEADERS, "X-Api-Key": api_key}
+    body: dict = {"api_key": api_key, "reveal_personal_emails": True}
+
+    if linkedin_url:
+        body["linkedin_url"] = linkedin_url
+    elif email:
+        body["email"] = email
+    else:
+        parts = name.split()
+        body["first_name"] = parts[0] if parts else ""
+        body["last_name"] = " ".join(parts[1:]) if len(parts) > 1 else ""
+        body["organization_name"] = company
+
+    resp = requests.post("https://api.apollo.io/v1/people/match", headers=hdrs, json=body, timeout=20)
+    if resp.status_code == 422:
+        raise ValueError(f"Apollo people/match 422: {resp.text}")
+    if not resp.ok:
+        raise RuntimeError(f"Apollo people/match {resp.status_code}: {resp.text}")
+    return resp.json().get("person") or {}
+
+
+def enrich_company(name: str = "", website: str = "", api_key: str = "") -> dict:
+    """
+    Call Apollo /v1/organizations/enrich for a company.
+    Returns the 'organization' dict (empty dict if not found).
+    Prefers domain match over name match.
+    """
+    if not api_key:
+        api_key = os.getenv("APOLLO_API_KEY", "")
+
+    hdrs = {**_APOLLO_HEADERS, "X-Api-Key": api_key}
+    body: dict = {"api_key": api_key}
+
+    if website:
+        domain = website.replace("https://", "").replace("http://", "").split("/")[0]
+        body["domain"] = domain
+    elif name:
+        body["name"] = name
+    else:
+        return {}
+
+    resp = requests.post("https://api.apollo.io/v1/organizations/enrich", headers=hdrs, json=body, timeout=20)
+    if resp.status_code == 422:
+        raise ValueError(f"Apollo organizations/enrich 422: {resp.text}")
+    if not resp.ok:
+        raise RuntimeError(f"Apollo organizations/enrich {resp.status_code}: {resp.text}")
+    return resp.json().get("organization") or {}
+
+
+# ---------------------------------------------------------------------------
 # Main flow
 # ---------------------------------------------------------------------------
 

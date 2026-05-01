@@ -589,118 +589,192 @@ with tab_apollo_csv:
 # TAB 4 — Enrich Leads
 # ===========================================================================
 with tab_enrich:
-    st.markdown("#### Enrich existing leads via Apollo")
+    st.markdown("#### Enrich leads from Google Sheets")
     st.caption(
-        "Reads leads from the CRM that are missing data, looks them up in Apollo "
-        "by email or LinkedIn URL, and fills in the blanks."
+        "Mark leads for enrichment by typing any value (e.g. **x**) in the **enrich?** column "
+        "of the Google Sheet. The app reads up to 10 marked rows and fills in missing fields via Apollo."
     )
 
-    _apollo_key = os.getenv("APOLLO_API_KEY", "") or st.secrets.get("APOLLO_API_KEY", "")
+    _apollo_key = st.secrets.get("APOLLO_API_KEY", "") or os.getenv("APOLLO_API_KEY", "")
+    _tavily_key = st.secrets.get("TAVILY_API_KEY", "") or os.getenv("TAVILY_API_KEY", "")
+    _ant_key    = st.secrets.get("ANTHROPIC_API_KEY", "") or os.getenv("ANTHROPIC_API_KEY", "")
+
     if not _apollo_key:
         st.warning("Apollo API key not configured. Add `APOLLO_API_KEY` to Streamlit secrets.")
 
-    with st.container(border=True):
-        enrich_field = st.radio(
-            "Match leads on",
-            ["Email", "LinkedIn URL"],
-            horizontal=True,
-            help="Apollo uses this field to find the contact record.",
-        )
-        enrich_limit = st.number_input(
-            "Max leads to enrich per run",
-            min_value=1, max_value=50, value=10,
-            help="Apollo enrichment uses 1 credit per contact.",
-        )
+    st.info(
+        "**How to mark a lead:**  \n"
+        "Open the Google Sheet → find the lead row → type **x** (or any value) in the **enrich?** column.  \n"
+        "The flag is automatically cleared after enrichment.",
+        icon="💡",
+    )
 
-    if st.button("Enrich leads", type="primary", key="btn_enrich"):
-        if not _apollo_key:
-            st.error("Apollo API key not configured.")
+    if st.button("Load marked leads", key="btn_load_enrich"):
+        from sheets_writer import _get_sheet as _gs
+
+        with st.spinner("Reading sheet…"):
+            _ws   = _gs()
+            _all  = _ws.get_all_values()
+
+        if len(_all) < 2:
+            st.warning("Sheet is empty.")
         else:
-            import requests as _req
-            from sheets_writer import _get_sheet, _normalise
-
-            with st.spinner("Reading CRM…"):
-                _sheet = _get_sheet()
-                _all   = _sheet.get_all_values()
-
-            if len(_all) < 2:
-                st.warning("No leads found in the CRM.")
+            _hdrs = _all[0]
+            if "enrich?" not in _hdrs:
+                st.error(
+                    "Column **enrich?** not found in your Google Sheet.  \n"
+                    "Please add it as the last column header (column AB)."
+                )
             else:
-                _headers = _all[0]
-                _rows    = [dict(zip(_headers, r)) for r in _all[1:]]
-
-                # Find rows missing key fields
-                _match_col = "DMU mail" if enrich_field == "Email" else "DMU LI URL"
+                _ecol = _hdrs.index("enrich?")
                 _candidates = [
-                    (i + 2, r) for i, r in enumerate(_rows)
-                    if r.get(_match_col, "").strip()
-                    and not r.get("DMU phone", "").strip()
-                ][:int(enrich_limit)]
+                    (i + 2, dict(zip(_hdrs, row)))
+                    for i, row in enumerate(_all[1:])
+                    if len(row) > _ecol and row[_ecol].strip()
+                ][:10]
 
                 if not _candidates:
-                    st.info("No leads need enrichment (all already have a phone, or no match field found).")
+                    st.info("No rows marked for enrichment. Add **x** to the **enrich?** column in the sheet.")
                 else:
-                    st.info(f"Enriching **{len(_candidates)}** lead(s)…")
-                    _hdrs = {
-                        "X-Api-Key": _apollo_key,
-                        "Content-Type": "application/json",
-                        "Cache-Control": "no-cache",
-                    }
-                    enriched = skipped_e = errors_e = 0
-                    bar = st.progress(0)
+                    st.session_state["_enrich_cands"]  = _candidates
+                    st.session_state["_enrich_headers"] = _hdrs
 
-                    for idx, (sheet_row, lead) in enumerate(_candidates):
-                        bar.progress(int((idx + 1) / len(_candidates) * 100))
-                        body: dict = {"api_key": _apollo_key, "reveal_personal_emails": True}
-                        if enrich_field == "Email":
-                            body["email"] = lead[_match_col]
-                        else:
-                            body["linkedin_url"] = lead[_match_col]
+    # ---- Preview and confirm ----
+    if st.session_state.get("_enrich_cands"):
+        _cands  = st.session_state["_enrich_cands"]
+        _hdrs   = st.session_state["_enrich_headers"]
 
-                        try:
-                            _r = _req.post(
-                                "https://api.apollo.io/v1/people/match",
-                                headers=_hdrs, json=body, timeout=15,
+        st.markdown(f"**{len(_cands)} lead(s) queued for enrichment:**")
+        _preview = []
+        for _sr, _lead in _cands:
+            _has_dmu = bool(_lead.get("DMU name", "").strip())
+            _preview.append({
+                "Row":              _sr,
+                "Company":          _lead.get("Company name", "—") or "—",
+                "DMU name":         _lead.get("DMU name",    "—") or "—",
+                "DMU enrichment":   "phone · email · LinkedIn" if _has_dmu else "—",
+                "Company enrichment": "phone · LinkedIn · website · employees · revenue",
+            })
+        st.table(_preview)
+
+        _notes_note = " + AI sales notes" if (_tavily_key and _ant_key) else ""
+        st.caption(f"Source: Apollo{_notes_note}. Only **empty** cells are filled. Existing values are never overwritten.")
+
+        if st.button("Enrich marked leads", type="primary", key="btn_run_enrich"):
+            if not _apollo_key:
+                st.error("Apollo API key not configured.")
+            else:
+                from apollo_agent import enrich_person, enrich_company
+                from sheets_writer import _get_sheet as _gs2
+
+                _ws2     = _gs2()
+                _ok      = 0
+                _err     = 0
+                _bar     = st.progress(0)
+
+                for _idx, (_sr, _lead) in enumerate(_cands):
+                    _bar.progress(int((_idx + 1) / len(_cands) * 100))
+                    try:
+                        _person_data = {}
+                        _org_data    = {}
+
+                        # --- Person enrichment ---
+                        if _lead.get("DMU name", "").strip():
+                            _person_data = enrich_person(
+                                name        = _lead.get("DMU name",   ""),
+                                company     = _lead.get("Company name", ""),
+                                linkedin_url= _lead.get("DMU LI URL", ""),
+                                email       = _lead.get("DMU mail",   ""),
+                                api_key     = _apollo_key,
                             )
-                            if not _r.ok:
-                                errors_e += 1
-                                continue
-                            _person = _r.json().get("person") or {}
-                            if not _person:
-                                skipped_e += 1
-                                continue
+                            _org_data = _person_data.get("organization") or {}
 
-                            # Build update values for the columns we want to fill
-                            _phone_nums = _person.get("phone_numbers") or []
-                            _phone = (_phone_nums[0].get("sanitized_number") if _phone_nums else "") or ""
-                            _updates = {
-                                "DMU phone":    _phone or lead.get("DMU phone", ""),
-                                "seniority":    _person.get("seniority", "") or lead.get("seniority", ""),
-                                "department":   ", ".join(_person.get("departments") or []) or lead.get("department", ""),
-                                "email status": _person.get("email_status", "") or lead.get("email status", ""),
-                                "DMU LI URL":   _person.get("linkedin_url", "") or lead.get("DMU LI URL", ""),
-                            }
-                            org = _person.get("organization") or {}
-                            _updates["# employees"] = str(org.get("estimated_num_employees", "") or lead.get("# employees", ""))
-                            _updates["annual revenue"] = str(org.get("annual_revenue", "") or lead.get("annual revenue", ""))
-                            _updates["website"]       = org.get("website_url", "") or lead.get("website", "")
-                            _updates["comp. LI URL"]  = org.get("linkedin_url", "") or lead.get("comp. LI URL", "")
+                        # --- Company enrichment (standalone or supplement) ---
+                        if not _org_data:
+                            _org_data = enrich_company(
+                                name    = _lead.get("Company name", ""),
+                                website = _lead.get("website",      ""),
+                                api_key = _apollo_key,
+                            )
 
-                            # Write back only changed cells
-                            from config import SHEET_COLUMNS as _COLS
-                            for col_name, new_val in _updates.items():
-                                if col_name in _COLS and new_val and not lead.get(col_name, "").strip():
-                                    col_idx = _COLS.index(col_name) + 1  # 1-based
-                                    _sheet.update_cell(sheet_row, col_idx, new_val)
+                        # --- Build update map (only empty target cells) ---
+                        _upd: dict[str, str] = {}
 
-                            enriched += 1
-                        except Exception as _e:
-                            st.warning(f"Row {sheet_row}: {_e}")
-                            errors_e += 1
+                        if _person_data:
+                            _phones = _person_data.get("phone_numbers") or []
+                            _ph     = (_phones[0].get("sanitized_number") if _phones else "") or ""
+                            if not _lead.get("DMU phone", "").strip() and _ph:
+                                _upd["DMU phone"] = _ph
+                            if not _lead.get("DMU mail", "").strip() and _person_data.get("email"):
+                                _upd["DMU mail"] = _person_data["email"]
+                            if not _lead.get("DMU LI URL", "").strip() and _person_data.get("linkedin_url"):
+                                _upd["DMU LI URL"] = _person_data["linkedin_url"]
 
-                    bar.empty()
-                    st.success(
-                        f"✅ Done — **{enriched}** lead(s) enriched, "
-                        f"**{skipped_e}** not found in Apollo"
-                        + (f", {errors_e} error(s)" if errors_e else "") + "."
-                    )
+                        if _org_data:
+                            if not _lead.get("comp. phone", "").strip() and _org_data.get("phone"):
+                                _upd["comp. phone"] = _org_data["phone"]
+                            if not _lead.get("comp. LI URL", "").strip() and _org_data.get("linkedin_url"):
+                                _upd["comp. LI URL"] = _org_data["linkedin_url"]
+                            if not _lead.get("website", "").strip() and _org_data.get("website_url"):
+                                _upd["website"] = _org_data["website_url"]
+                            if not _lead.get("# employees", "").strip() and _org_data.get("estimated_num_employees"):
+                                _upd["# employees"] = str(_org_data["estimated_num_employees"])
+                            if not _lead.get("annual revenue", "").strip() and _org_data.get("annual_revenue"):
+                                _upd["annual revenue"] = str(_org_data["annual_revenue"])
+
+                        # --- Sales notes via Tavily + Claude (best-effort) ---
+                        if _tavily_key and _ant_key and not _lead.get("sales notes", "").strip():
+                            try:
+                                from tavily import TavilyClient
+                                import anthropic as _ant_mod
+                                _co = _lead.get("Company name", "")
+                                if _co:
+                                    _tv   = TavilyClient(api_key=_tavily_key)
+                                    _hits = _tv.search(
+                                        f"{_co} uitdagingen AI digitalisering operationeel",
+                                        max_results=3,
+                                    )
+                                    _snip = " ".join(
+                                        r.get("content", "")[:300]
+                                        for r in _hits.get("results", [])
+                                    )
+                                    if _snip:
+                                        _ac  = _ant_mod.Anthropic(api_key=_ant_key)
+                                        _msg = _ac.messages.create(
+                                            model="claude-haiku-4-5-20251001",
+                                            max_tokens=120,
+                                            system=(
+                                                "Schrijf één korte Nederlandse zin (max 20 woorden) over waarom "
+                                                "dit bedrijf waarschijnlijk baat heeft bij AI-training of procesverbetering, "
+                                                "op basis van de aangeleverde websnippets."
+                                            ),
+                                            messages=[{"role": "user", "content": f"Bedrijf: {_co}\nSnippets: {_snip}"}],
+                                        )
+                                        _note = _msg.content[0].text.strip()
+                                        if _note:
+                                            _upd["sales notes"] = _note
+                            except Exception:
+                                pass  # sales notes are best-effort
+
+                        # --- Write updates ---
+                        for _col, _val in _upd.items():
+                            if _col in _hdrs:
+                                _ci = _hdrs.index(_col) + 1  # 1-based
+                                _ws2.update_cell(_sr, _ci, _val)
+
+                        # Clear enrich? flag
+                        _ws2.update_cell(_sr, _hdrs.index("enrich?") + 1, "")
+                        _ok += 1
+
+                    except Exception as _ex:
+                        st.warning(f"Row {_sr} ({_lead.get('Company name', '?')}): {_ex}")
+                        _err += 1
+
+                _bar.empty()
+                del st.session_state["_enrich_cands"]
+                del st.session_state["_enrich_headers"]
+
+                st.success(
+                    f"✅ Done — **{_ok}** lead(s) enriched"
+                    + (f", {_err} error(s)" if _err else "") + "."
+                )
