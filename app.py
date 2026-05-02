@@ -606,130 +606,33 @@ with tab_enrich:
                             if not _lead.get("annual revenue","").strip() and _org_data.get("annual_revenue"):
                                 _upd["annual revenue"] = str(_org_data["annual_revenue"])
 
-                        # --- Tavily + Claude web enrichment ---
-                        if _tavily_key and _ant_key:
-                            from tavily import TavilyClient
-                            import anthropic as _ant_mod
-                            import json as _json
-
-                            _tv = TavilyClient(api_key=_tavily_key)
-                            _ac = _ant_mod.Anthropic(api_key=_ant_key)
-                            _co = _lead.get("Company name", "")
-
-                            def _strip_fences(s: str) -> str:
-                                if s.startswith("```"):
-                                    s = s.split("```")[1]
-                                    if s.startswith("json"):
-                                        s = s[4:]
-                                return s.strip()
-
-                            def _web_err_msg(err: Exception, context: str) -> None:
-                                _m = str(err)
-                                if "401" in _m or "authentication_error" in _m or "invalid x-api-key" in _m:
+                        # --- Tavily + Claude sequential web enrichment ---
+                        _web_fields = [
+                            "comp. LI URL", "Location", "Industry", "comp. phone",
+                            "comp. mail", "website", "# employees", "annual revenue",
+                            "sales notes", "DMU LI URL", "DMU title", "DMU mail",
+                            "DMU phone", "seniority", "department",
+                        ]
+                        _needs_web = _tavily_key and _ant_key and any(
+                            not {**_lead, **_upd}.get(f, "").strip() for f in _web_fields
+                        )
+                        if _needs_web:
+                            try:
+                                from web_enrichment import enrich_from_web
+                                _web_found = enrich_from_web(
+                                    {**_lead, **_upd},  # pass Apollo results as context
+                                    _tavily_key,
+                                    _ant_key,
+                                )
+                                for _wf, _wv in _web_found.items():
+                                    if _wv and not {**_lead, **_upd}.get(_wf, "").strip():
+                                        _upd[_wf] = _wv
+                            except Exception as _web_err:
+                                _em = str(_web_err)
+                                if "401" in _em or "authentication_error" in _em or "invalid x-api-key" in _em:
                                     st.warning("⚠️ ANTHROPIC_API_KEY in Streamlit secrets is invalid or expired. Update it under Settings → Secrets.")
                                 else:
-                                    st.caption(f"↳ {context}: {err}")
-
-                            # -- 1. Company search --
-                            _co_fields = ["comp. LI URL", "Location", "Industry", "comp. phone",
-                                          "comp. mail", "website", "# employees", "annual revenue"]
-                            _needs_co  = _co and any(
-                                not _lead.get(f, "").strip() and f not in _upd for f in _co_fields
-                            )
-                            if _needs_co:
-                                try:
-                                    _hits = _tv.search(
-                                        f'"{_co}" LinkedIn vestiging Nederland industrie telefoonnummer e-mail website medewerkers omzet',
-                                        max_results=5,
-                                    )
-                                    _snip = " ".join(r.get("content", "")[:400] for r in _hits.get("results", []))
-                                    _urls = [r.get("url", "") for r in _hits.get("results", [])]
-                                    if _snip:
-                                        _raw = _ac.messages.create(
-                                            model="claude-haiku-4-5-20251001",
-                                            max_tokens=400,
-                                            system=(
-                                                "Extract company data from web snippets. Return ONLY a valid JSON object "
-                                                "with these keys in order (empty string \"\" if unknown): "
-                                                "linkedin_url, location, industry, phone, email, website, num_employees, annual_revenue. "
-                                                "linkedin_url: company LinkedIn page URL. "
-                                                "location: Dutch office or HQ (city/region). "
-                                                "industry: primary industry or SBI/NACE code. "
-                                                "phone: main company phone number. "
-                                                "email: general company email address. "
-                                                "website: company website URL. "
-                                                "num_employees: headcount as integer or range string. "
-                                                "annual_revenue: revenue as number or descriptive string. "
-                                                "Return ONLY the JSON — no markdown, no explanation."
-                                            ),
-                                            messages=[{"role": "user", "content": f"Company: {_co}\nSnippets: {_snip}\nURLs: {_urls}"}],
-                                        ).content[0].text.strip()
-                                        _ext = _json.loads(_strip_fences(_raw))
-                                        _co_map = {
-                                            "comp. LI URL":   "linkedin_url",
-                                            "Location":       "location",
-                                            "Industry":       "industry",
-                                            "comp. phone":    "phone",
-                                            "comp. mail":     "email",
-                                            "website":        "website",
-                                            "# employees":    "num_employees",
-                                            "annual revenue": "annual_revenue",
-                                        }
-                                        for _sc, _ek in _co_map.items():
-                                            _v = str(_ext.get(_ek, "") or "").strip()
-                                            if _v and not _lead.get(_sc, "").strip() and _sc not in _upd:
-                                                _upd[_sc] = _v
-                                except Exception as _e:
-                                    _web_err_msg(_e, f"company search for {_co_name}")
-
-                            # -- 2. DMU search --
-                            _dmu = _lead.get("DMU name", "").strip()
-                            _dmu_fields = ["DMU LI URL", "DMU title", "DMU mail", "DMU phone",
-                                           "seniority", "department"]
-                            _needs_dmu  = _dmu and any(
-                                not _lead.get(f, "").strip() and f not in _upd for f in _dmu_fields
-                            )
-                            if _needs_dmu:
-                                try:
-                                    _hits = _tv.search(
-                                        f'"{_dmu}" "{_co}" LinkedIn functie rol e-mail telefoon',
-                                        max_results=4,
-                                    )
-                                    _snip = " ".join(r.get("content", "")[:400] for r in _hits.get("results", []))
-                                    _urls = [r.get("url", "") for r in _hits.get("results", [])]
-                                    if _snip:
-                                        _raw = _ac.messages.create(
-                                            model="claude-haiku-4-5-20251001",
-                                            max_tokens=300,
-                                            system=(
-                                                "Extract contact/person data from web snippets. Return ONLY a valid JSON object "
-                                                "with these keys in order (empty string \"\" if unknown): "
-                                                "linkedin_url, title, email, phone, seniority, department. "
-                                                "linkedin_url: person's LinkedIn profile URL. "
-                                                "title: job title or role. "
-                                                "email: business email address. "
-                                                "phone: direct phone or mobile number. "
-                                                "seniority: level (e.g. director, manager, c_suite, owner). "
-                                                "department: department or functional area. "
-                                                "Return ONLY the JSON — no markdown, no explanation."
-                                            ),
-                                            messages=[{"role": "user", "content": f"Person: {_dmu}\nCompany: {_co}\nSnippets: {_snip}\nURLs: {_urls}"}],
-                                        ).content[0].text.strip()
-                                        _ext = _json.loads(_strip_fences(_raw))
-                                        _dmu_map = {
-                                            "DMU LI URL":  "linkedin_url",
-                                            "DMU title":   "title",
-                                            "DMU mail":    "email",
-                                            "DMU phone":   "phone",
-                                            "seniority":   "seniority",
-                                            "department":  "department",
-                                        }
-                                        for _sc, _ek in _dmu_map.items():
-                                            _v = str(_ext.get(_ek, "") or "").strip()
-                                            if _v and not _lead.get(_sc, "").strip() and _sc not in _upd:
-                                                _upd[_sc] = _v
-                                except Exception as _e:
-                                    _web_err_msg(_e, f"DMU search for {_dmu}")
+                                    st.caption(f"↳ Web enrichment for {_co_name}: {_web_err}")
 
                         # --- Write to sheet ---
                         _written_cols = []
