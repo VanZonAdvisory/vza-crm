@@ -661,7 +661,11 @@ with tab_enrich:
                                             if _val and not _lead.get(_sheet_col, "").strip() and _sheet_col not in _upd:
                                                 _upd[_sheet_col] = _val
                                 except Exception as _web_err:
-                                    st.caption(f"↳ Web fallback for {_co_name}: {_web_err}")
+                                    _msg_str = str(_web_err)
+                                    if "401" in _msg_str or "authentication_error" in _msg_str or "invalid x-api-key" in _msg_str:
+                                        st.warning("⚠️ ANTHROPIC_API_KEY in Streamlit secrets is invalid or expired. Update it under Settings → Secrets.")
+                                    else:
+                                        st.caption(f"↳ Web fallback for {_co_name}: {_web_err}")
 
                         # --- Write to sheet ---
                         _written_cols = []
