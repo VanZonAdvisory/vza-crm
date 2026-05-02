@@ -21,9 +21,19 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+_LI_COMPANY_RE = re.compile(
+    r'https?://(?:www\.|[a-z]{2}\.)?linkedin\.com/company/([\w\-]+)',
+    re.IGNORECASE,
+)
+_LI_PERSON_RE = re.compile(
+    r'https?://(?:www\.|[a-z]{2}\.)?linkedin\.com/in/([\w\-]+)',
+    re.IGNORECASE,
+)
 
 # ---------------------------------------------------------------------------
 # Field lists (in priority order)
@@ -84,11 +94,27 @@ def _extract(ac_client, system: str, user_msg: str) -> dict:
     return json.loads(raw.strip())
 
 
-def _linkedin_url_from_results(urls: list[str], pattern: str) -> str:
-    """Return the first URL that contains *pattern*, stripped of query params."""
+def _find_li_company(text: str, urls: list[str]) -> str:
+    """Return the first LinkedIn company URL found in URLs or snippet text."""
     for url in urls:
-        if pattern in url:
-            return url.split("?")[0]
+        m = _LI_COMPANY_RE.search(url)
+        if m:
+            return f"https://www.linkedin.com/company/{m.group(1)}"
+    m = _LI_COMPANY_RE.search(text)
+    if m:
+        return f"https://www.linkedin.com/company/{m.group(1)}"
+    return ""
+
+
+def _find_li_person(text: str, urls: list[str]) -> str:
+    """Return the first LinkedIn person URL found in URLs or snippet text."""
+    for url in urls:
+        m = _LI_PERSON_RE.search(url)
+        if m:
+            return f"https://www.linkedin.com/in/{m.group(1)}"
+    m = _LI_PERSON_RE.search(text)
+    if m:
+        return f"https://www.linkedin.com/in/{m.group(1)}"
     return ""
 
 
@@ -153,6 +179,11 @@ def enrich_from_web(lead: dict, tavily_key: str, anthropic_key: str) -> dict:
                     ),
                     user_msg=f"Company: {company}\nSnippets: {snippets}\nURLs: {urls}",
                 )
+                # Scan raw results for LinkedIn URL first (more reliable than Claude)
+                li_from_results = _find_li_company(snippets, urls)
+                if li_from_results and not _ctx().get("comp. LI URL", "").strip():
+                    found["comp. LI URL"] = li_from_results
+
                 _company_map = {
                     "comp. LI URL":  "comp_li_url",
                     "Location":      "location",
@@ -172,15 +203,20 @@ def enrich_from_web(lead: dict, tavily_key: str, anthropic_key: str) -> dict:
             logger.warning("Company search failed for %s: %s", company, exc)
             raise
 
-        # Targeted LinkedIn fallback if still missing
+        # Dedicated LinkedIn fallback — try two queries and scan all text+URLs
         if not _ctx().get("comp. LI URL", "").strip():
-            try:
-                _, li_urls = _search(tv, f"{company} site:linkedin.com/company", max_results=3)
-                li_url = _linkedin_url_from_results(li_urls, "linkedin.com/company/")
-                if li_url:
-                    found["comp. LI URL"] = li_url
-            except Exception:
-                pass
+            for _li_query in [
+                f'"{company}" linkedin.com/company',
+                f"{company} LinkedIn bedrijfspagina",
+            ]:
+                try:
+                    _snip2, _urls2 = _search(tv, _li_query, max_results=3)
+                    li_url = _find_li_company(_snip2, _urls2)
+                    if li_url:
+                        found["comp. LI URL"] = li_url
+                        break
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------ #
     # Phase 2 — DMU (when name is known)                                   #
@@ -209,6 +245,11 @@ def enrich_from_web(lead: dict, tavily_key: str, anthropic_key: str) -> dict:
                         f"Snippets: {snippets}\nURLs: {urls}"
                     ),
                 )
+                # Scan raw results for LinkedIn URL first
+                li_from_results = _find_li_person(snippets, urls)
+                if li_from_results and not _ctx().get("DMU LI URL", "").strip():
+                    found["DMU LI URL"] = li_from_results
+
                 _dmu_map = {
                     "DMU LI URL": "dmu_li_url",
                     "DMU title":  "dmu_title",
@@ -225,15 +266,20 @@ def enrich_from_web(lead: dict, tavily_key: str, anthropic_key: str) -> dict:
             logger.warning("DMU search failed for %s @ %s: %s", dmu, company, exc)
             raise
 
-        # Targeted LinkedIn fallback if still missing
+        # Dedicated LinkedIn fallback — try two queries and scan all text+URLs
         if not _ctx().get("DMU LI URL", "").strip():
-            try:
-                _, li_urls = _search(tv, f"{dmu} {company} site:linkedin.com/in", max_results=3)
-                li_url = _linkedin_url_from_results(li_urls, "linkedin.com/in/")
-                if li_url:
-                    found["DMU LI URL"] = li_url
-            except Exception:
-                pass
+            for _li_query in [
+                f'"{dmu}" "{company}" linkedin.com/in',
+                f"{dmu} {company} LinkedIn profiel",
+            ]:
+                try:
+                    _snip2, _urls2 = _search(tv, _li_query, max_results=3)
+                    li_url = _find_li_person(_snip2, _urls2)
+                    if li_url:
+                        found["DMU LI URL"] = li_url
+                        break
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------ #
     # Phase 3 — DMU suggestions (when no DMU name at all)                  #
