@@ -537,8 +537,8 @@ with tab_enrich:
             })
         st.table(_preview)
 
-        _notes_note = " + AI sales notes" if (_tavily_key and _ant_key) else ""
-        st.caption(f"Source: Apollo{_notes_note}. Only **empty** cells are filled. Existing values are never overwritten.")
+        _web_note = " + web fallback" if (_tavily_key and _ant_key) else ""
+        st.caption(f"Source: Apollo{_web_note}. Only **empty** cells are filled. Existing values are never overwritten.")
 
         if st.button("Enrich marked leads", type="primary", key="btn_run_enrich"):
             if not _apollo_key:
@@ -606,71 +606,130 @@ with tab_enrich:
                             if not _lead.get("annual revenue","").strip() and _org_data.get("annual_revenue"):
                                 _upd["annual revenue"] = str(_org_data["annual_revenue"])
 
-                        # --- Tavily + Claude fallback for still-missing company fields ---
-                        _needs_web = any(
-                            not _lead.get(f, "").strip() and f not in _upd
-                            for f in ["website", "comp. phone", "comp. LI URL", "# employees", "sales notes"]
-                        )
-                        if _tavily_key and _ant_key and _needs_web:
-                            _co = _lead.get("Company name", "")
-                            if _co:
-                                try:
-                                    from tavily import TavilyClient
-                                    import anthropic as _ant_mod
-                                    import json as _json
+                        # --- Tavily + Claude web enrichment ---
+                        if _tavily_key and _ant_key:
+                            from tavily import TavilyClient
+                            import anthropic as _ant_mod
+                            import json as _json
 
-                                    _tv   = TavilyClient(api_key=_tavily_key)
+                            _tv = TavilyClient(api_key=_tavily_key)
+                            _ac = _ant_mod.Anthropic(api_key=_ant_key)
+                            _co = _lead.get("Company name", "")
+
+                            def _strip_fences(s: str) -> str:
+                                if s.startswith("```"):
+                                    s = s.split("```")[1]
+                                    if s.startswith("json"):
+                                        s = s[4:]
+                                return s.strip()
+
+                            def _web_err_msg(err: Exception, context: str) -> None:
+                                _m = str(err)
+                                if "401" in _m or "authentication_error" in _m or "invalid x-api-key" in _m:
+                                    st.warning("⚠️ ANTHROPIC_API_KEY in Streamlit secrets is invalid or expired. Update it under Settings → Secrets.")
+                                else:
+                                    st.caption(f"↳ {context}: {err}")
+
+                            # -- 1. Company search --
+                            _co_fields = ["comp. LI URL", "Location", "Industry", "comp. phone",
+                                          "comp. mail", "website", "# employees", "annual revenue"]
+                            _needs_co  = _co and any(
+                                not _lead.get(f, "").strip() and f not in _upd for f in _co_fields
+                            )
+                            if _needs_co:
+                                try:
                                     _hits = _tv.search(
-                                        f"{_co} bedrijf website telefoonnummer LinkedIn medewerkers",
+                                        f'"{_co}" LinkedIn vestiging Nederland industrie telefoonnummer e-mail website medewerkers omzet',
                                         max_results=5,
                                     )
-                                    _snip = " ".join(
-                                        r.get("content", "")[:400]
-                                        for r in _hits.get("results", [])
-                                    )
+                                    _snip = " ".join(r.get("content", "")[:400] for r in _hits.get("results", []))
                                     _urls = [r.get("url", "") for r in _hits.get("results", [])]
-
                                     if _snip:
-                                        _ac  = _ant_mod.Anthropic(api_key=_ant_key)
+                                        _raw = _ac.messages.create(
+                                            model="claude-haiku-4-5-20251001",
+                                            max_tokens=400,
+                                            system=(
+                                                "Extract company data from web snippets. Return ONLY a valid JSON object "
+                                                "with these keys in order (empty string \"\" if unknown): "
+                                                "linkedin_url, location, industry, phone, email, website, num_employees, annual_revenue. "
+                                                "linkedin_url: company LinkedIn page URL. "
+                                                "location: Dutch office or HQ (city/region). "
+                                                "industry: primary industry or SBI/NACE code. "
+                                                "phone: main company phone number. "
+                                                "email: general company email address. "
+                                                "website: company website URL. "
+                                                "num_employees: headcount as integer or range string. "
+                                                "annual_revenue: revenue as number or descriptive string. "
+                                                "Return ONLY the JSON — no markdown, no explanation."
+                                            ),
+                                            messages=[{"role": "user", "content": f"Company: {_co}\nSnippets: {_snip}\nURLs: {_urls}"}],
+                                        ).content[0].text.strip()
+                                        _ext = _json.loads(_strip_fences(_raw))
+                                        _co_map = {
+                                            "comp. LI URL":   "linkedin_url",
+                                            "Location":       "location",
+                                            "Industry":       "industry",
+                                            "comp. phone":    "phone",
+                                            "comp. mail":     "email",
+                                            "website":        "website",
+                                            "# employees":    "num_employees",
+                                            "annual revenue": "annual_revenue",
+                                        }
+                                        for _sc, _ek in _co_map.items():
+                                            _v = str(_ext.get(_ek, "") or "").strip()
+                                            if _v and not _lead.get(_sc, "").strip() and _sc not in _upd:
+                                                _upd[_sc] = _v
+                                except Exception as _e:
+                                    _web_err_msg(_e, f"company search for {_co_name}")
+
+                            # -- 2. DMU search --
+                            _dmu = _lead.get("DMU name", "").strip()
+                            _dmu_fields = ["DMU LI URL", "DMU title", "DMU mail", "DMU phone",
+                                           "seniority", "department"]
+                            _needs_dmu  = _dmu and any(
+                                not _lead.get(f, "").strip() and f not in _upd for f in _dmu_fields
+                            )
+                            if _needs_dmu:
+                                try:
+                                    _hits = _tv.search(
+                                        f'"{_dmu}" "{_co}" LinkedIn functie rol e-mail telefoon',
+                                        max_results=4,
+                                    )
+                                    _snip = " ".join(r.get("content", "")[:400] for r in _hits.get("results", []))
+                                    _urls = [r.get("url", "") for r in _hits.get("results", [])]
+                                    if _snip:
                                         _raw = _ac.messages.create(
                                             model="claude-haiku-4-5-20251001",
                                             max_tokens=300,
                                             system=(
-                                                "Extract company information from web snippets and return ONLY "
-                                                "a valid JSON object with these keys (empty string if unknown): "
-                                                "website, phone, linkedin_url, num_employees, sales_note. "
-                                                "sales_note: one Dutch sentence (max 20 words) on why this company "
-                                                "likely benefits from AI training or process improvement. "
-                                                "Return ONLY the JSON — no markdown fences, no explanation."
+                                                "Extract contact/person data from web snippets. Return ONLY a valid JSON object "
+                                                "with these keys in order (empty string \"\" if unknown): "
+                                                "linkedin_url, title, email, phone, seniority, department. "
+                                                "linkedin_url: person's LinkedIn profile URL. "
+                                                "title: job title or role. "
+                                                "email: business email address. "
+                                                "phone: direct phone or mobile number. "
+                                                "seniority: level (e.g. director, manager, c_suite, owner). "
+                                                "department: department or functional area. "
+                                                "Return ONLY the JSON — no markdown, no explanation."
                                             ),
-                                            messages=[{"role": "user", "content": f"Company: {_co}\nSnippets: {_snip}\nURLs: {_urls}"}],
+                                            messages=[{"role": "user", "content": f"Person: {_dmu}\nCompany: {_co}\nSnippets: {_snip}\nURLs: {_urls}"}],
                                         ).content[0].text.strip()
-
-                                        # Strip accidental markdown fences
-                                        if _raw.startswith("```"):
-                                            _raw = _raw.split("```")[1]
-                                            if _raw.startswith("json"):
-                                                _raw = _raw[4:]
-
-                                        _ext = _json.loads(_raw)
-
-                                        _web_map = {
-                                            "website":      "website",
-                                            "comp. phone":  "phone",
-                                            "comp. LI URL": "linkedin_url",
-                                            "# employees":  "num_employees",
-                                            "sales notes":  "sales_note",
+                                        _ext = _json.loads(_strip_fences(_raw))
+                                        _dmu_map = {
+                                            "DMU LI URL":  "linkedin_url",
+                                            "DMU title":   "title",
+                                            "DMU mail":    "email",
+                                            "DMU phone":   "phone",
+                                            "seniority":   "seniority",
+                                            "department":  "department",
                                         }
-                                        for _sheet_col, _ext_key in _web_map.items():
-                                            _val = str(_ext.get(_ext_key, "") or "").strip()
-                                            if _val and not _lead.get(_sheet_col, "").strip() and _sheet_col not in _upd:
-                                                _upd[_sheet_col] = _val
-                                except Exception as _web_err:
-                                    _msg_str = str(_web_err)
-                                    if "401" in _msg_str or "authentication_error" in _msg_str or "invalid x-api-key" in _msg_str:
-                                        st.warning("⚠️ ANTHROPIC_API_KEY in Streamlit secrets is invalid or expired. Update it under Settings → Secrets.")
-                                    else:
-                                        st.caption(f"↳ Web fallback for {_co_name}: {_web_err}")
+                                        for _sc, _ek in _dmu_map.items():
+                                            _v = str(_ext.get(_ek, "") or "").strip()
+                                            if _v and not _lead.get(_sc, "").strip() and _sc not in _upd:
+                                                _upd[_sc] = _v
+                                except Exception as _e:
+                                    _web_err_msg(_e, f"DMU search for {_dmu}")
 
                         # --- Write to sheet ---
                         _written_cols = []
