@@ -465,7 +465,12 @@ with tab_enrich:
 
     _apollo_key = st.secrets.get("APOLLO_API_KEY", "") or os.getenv("APOLLO_API_KEY", "")
     _tavily_key = st.secrets.get("TAVILY_API_KEY", "") or os.getenv("TAVILY_API_KEY", "")
-    _ant_key    = st.secrets.get("ANTHROPIC_API_KEY", "") or os.getenv("ANTHROPIC_API_KEY", "")
+    _ant_key    = str(st.secrets.get("ANTHROPIC_API_KEY", "") or os.getenv("ANTHROPIC_API_KEY", "")).strip()
+
+    if _ant_key and not _ant_key.startswith("sk-ant-"):
+        st.warning(f"⚠️ ANTHROPIC_API_KEY looks wrong — starts with `{_ant_key[:12]}…` instead of `sk-ant-`. Check your Streamlit secrets.")
+    elif not _ant_key:
+        st.warning("⚠️ ANTHROPIC_API_KEY not found in Streamlit secrets.")
 
     if not _apollo_key:
         st.warning("Apollo API key not configured. Add `APOLLO_API_KEY` to Streamlit secrets.")
