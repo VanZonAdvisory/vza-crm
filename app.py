@@ -275,13 +275,15 @@ with tab_linkedin:
                 col2.metric("Location", fields.get("location", "—") or "not listed")
 
                 with st.spinner("Writing to CRM…"):
-                    row     = _to_lead_row(fields, linkedin_url=linkedin_url or "")
-                    written = append_lead(row)
+                    row    = _to_lead_row(fields, linkedin_url=linkedin_url or "")
+                    result = append_lead(row)
 
-                if written:
+                if result == "new":
                     st.success(f"✅ **{fields.get('name')}** added to the CRM.")
+                elif result == "enriched":
+                    st.info(f"ℹ️ **{fields.get('name')}** already exists — missing fields filled in.")
                 else:
-                    st.warning("⚠️ This lead already exists in the CRM — skipped.")
+                    st.warning("⚠️ This lead already exists and has no new data to add.")
 
 
 # ===========================================================================
@@ -425,7 +427,7 @@ with tab_apollo_csv:
                 rows = []
 
             if rows:
-                written = skipped = errors = 0
+                written = enriched = skipped = errors = 0
                 bar = st.progress(0, text="Writing to Google Sheets…")
 
                 for i, row in enumerate(rows):
@@ -437,8 +439,11 @@ with tab_apollo_csv:
                         skipped += 1
                         continue
                     try:
-                        if append_lead(row):
+                        result = append_lead(row)
+                        if result == "new":
                             written += 1
+                        elif result == "enriched":
+                            enriched += 1
                         else:
                             skipped += 1
                     except Exception as exc:
@@ -446,11 +451,13 @@ with tab_apollo_csv:
                         errors += 1
 
                 bar.empty()
-                st.success(
-                    f"✅ Done — **{written}** new lead(s) added, "
-                    f"**{skipped}** duplicate(s) / empty row(s) skipped"
-                    + (f", {errors} error(s)" if errors else "") + "."
-                )
+                msg = f"✅ Done — **{written}** new lead(s) added"
+                if enriched:
+                    msg += f", **{enriched}** existing lead(s) enriched"
+                msg += f", **{skipped}** duplicate(s) / empty row(s) skipped"
+                if errors:
+                    msg += f", {errors} error(s)"
+                st.success(msg + ".")
 
 
 # ===========================================================================

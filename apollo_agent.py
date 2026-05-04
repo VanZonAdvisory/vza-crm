@@ -270,7 +270,8 @@ def run(
             if not row["Company name"] and not row["DMU name"]:
                 continue
             try:
-                if append_lead(row):
+                result = append_lead(row)
+                if result == "new":
                     total_written += 1
                 else:
                     total_skipped += 1
@@ -280,7 +281,7 @@ def run(
         if page < pages:
             time.sleep(1)  # be polite to the API
 
-    print(f"\nDone. {total_written} new lead(s) written, {total_skipped} duplicate(s) skipped.")
+    print(f"\nDone. {total_written} new lead(s) written, {total_skipped} duplicate(s)/enriched skipped.")
 
 
 # ---------------------------------------------------------------------------

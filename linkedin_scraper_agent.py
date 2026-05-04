@@ -177,8 +177,8 @@ def scrape_search_url(search_url: str) -> int:
 
             for lead in leads:
                 try:
-                    written = append_lead(lead)
-                    if written:
+                    result = append_lead(lead)
+                    if result == "new":
                         total_written += 1
                 except Exception as exc:
                     logger.error("Failed to write lead %r: %s", lead.get("DMU name"), exc)

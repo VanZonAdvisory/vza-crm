@@ -286,14 +286,15 @@ def main() -> None:
             continue
         row = _map_to_sheet_row(raw)
         try:
-            if append_lead(row):
+            result = append_lead(row)
+            if result == "new":
                 written += 1
             else:
                 skipped += 1
         except Exception as exc:
             logger.error("Failed to write lead %r: %s", raw.get("company_name"), exc)
 
-    print(f"\nDone. {written} new lead(s) written, {skipped} duplicate(s) skipped.")
+    print(f"\nDone. {written} new lead(s) written, {skipped} duplicate(s)/enriched skipped.")
 
 
 if __name__ == "__main__":

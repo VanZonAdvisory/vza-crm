@@ -687,12 +687,14 @@ def main() -> None:
         sys.exit(1)
 
     row = _to_lead_row(fields, linkedin_url=args.url or "")
-    written = append_lead(row)
+    result = append_lead(row)
 
-    if written:
+    if result == "new":
         print(f"\nDone. '{fields.get('name')}' at '{fields.get('company')}' written to CRM.")
+    elif result == "enriched":
+        print(f"\nEnriched — '{fields.get('name')}' at '{fields.get('company')}': missing fields filled in.")
     else:
-        print(f"\nSkipped — '{fields.get('name')}' at '{fields.get('company')}' already exists.")
+        print(f"\nSkipped — '{fields.get('name')}' at '{fields.get('company')}' already exists and has no new data.")
 
 
 if __name__ == "__main__":

@@ -252,6 +252,11 @@ def _update_existing_row(
 
     Returns the number of cells actually updated.
     """
+    # Case-insensitive header index: stripped-lower name → 1-based column index
+    header_idx = {h.strip().lower(): i + 1 for i, h in enumerate(headers)}
+    # Case-insensitive existing-row lookup: stripped-lower name → value
+    existing_ci = {k.strip().lower(): str(v).strip() for k, v in existing.items()}
+
     updates: list[tuple[str, str]] = []
 
     for col in SHEET_COLUMNS:
@@ -259,7 +264,7 @@ def _update_existing_row(
             continue
 
         new_val = str(new_row.get(col, "")).strip()
-        old_val = str(existing.get(col, "")).strip()
+        old_val = existing_ci.get(col.strip().lower(), "")
 
         if not new_val:
             continue
@@ -275,8 +280,9 @@ def _update_existing_row(
                 updates.append((col, new_val))
 
     for col, val in updates:
-        if col in headers:
-            sheet.update_cell(sheet_row_num, headers.index(col) + 1, val)
+        ci = header_idx.get(col.strip().lower())
+        if ci is not None:
+            sheet.update_cell(sheet_row_num, ci, val)
 
     logger.info("Enriched row %d: updated %d cell(s)", sheet_row_num, len(updates))
     return len(updates)
@@ -286,16 +292,14 @@ def _update_existing_row(
 # Public API
 # ---------------------------------------------------------------------------
 
-def append_lead(row_dict: dict) -> bool:
+def append_lead(row_dict: dict) -> str:
     """
     Write *row_dict* to the Google Sheet.
 
-    - If no duplicate exists: appends a new row starting at column B
-      (column A = 'enrich?' is left untouched to preserve dropdown validation).
-    - If a duplicate exists: enriches the existing row by filling empty cells
-      and upgrading a non-mobile DMU phone to a mobile number.
-
-    Returns True if a new row was written, False otherwise.
+    Returns one of:
+      "new"       — a new row was appended
+      "enriched"  — duplicate found; one or more empty cells were filled
+      "duplicate" — duplicate found; nothing new to add
     """
     sheet = _get_sheet()
 
@@ -320,12 +324,18 @@ def append_lead(row_dict: dict) -> bool:
     if dup is not None:
         dup_idx, existing_row = dup
         sheet_row_num = dup_idx + 2  # +1 for header row, +1 for 1-based index
+        updated = _update_existing_row(sheet, sheet_row_num, headers, existing_row, row_dict)
+        if updated:
+            logger.info(
+                "Enriched row %d (%d cell(s) updated): company=%r dmu=%r",
+                sheet_row_num, updated, row_dict.get("Company name"), row_dict.get("DMU name"),
+            )
+            return "enriched"
         logger.info(
-            "Duplicate found at row %d — enriching existing row (company=%r dmu=%r)",
-            sheet_row_num, row_dict.get("Company name"), row_dict.get("DMU name"),
+            "Duplicate, nothing new: company=%r dmu=%r",
+            row_dict.get("Company name"), row_dict.get("DMU name"),
         )
-        _update_existing_row(sheet, sheet_row_num, headers, existing_row, row_dict)
-        return False
+        return "duplicate"
 
     # New row — write from column B onward to leave the enrich? dropdown intact
     data_cols = [c for c in SHEET_COLUMNS if c != "enrich?"]
@@ -348,4 +358,4 @@ def append_lead(row_dict: dict) -> bool:
         logger.error("Failed to write row: %s", exc)
         raise
 
-    return True
+    return "new"
