@@ -13,6 +13,7 @@ Responsibilities:
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -158,38 +159,127 @@ def _get_sheet() -> gspread.Worksheet:
 # ---------------------------------------------------------------------------
 # Deduplication helpers
 # ---------------------------------------------------------------------------
+# Phone normalisation helpers
+# ---------------------------------------------------------------------------
+
+_MOBILE_NL_RE = re.compile(r'^\+316\d{8}$')
+
+
+def _normalize_mobile_nl(raw: str) -> str:
+    """
+    Normalize a Dutch mobile phone number to +316XXXXXXXX.
+    Returns the original string unchanged if it is not a recognisable Dutch mobile.
+
+    Accepted input formats (spaces/dashes stripped):
+      06XXXXXXXX   →  +316XXXXXXXX
+      316XXXXXXXX  →  +316XXXXXXXX
+      00316XXXXXXXX → +316XXXXXXXX
+      +316XXXXXXXX  → +316XXXXXXXX  (already correct)
+    """
+    digits = re.sub(r'[^\d]', '', raw.strip().lstrip('+'))
+
+    if re.match(r'^316\d{8}$', digits):          # 316 + 8 digits
+        return f'+{digits}'
+    if re.match(r'^00316\d{8}$', digits):         # 00316 + 8 digits
+        return f'+{digits[2:]}'
+    if re.match(r'^06\d{8}$', digits):            # 06 + 8 digits
+        return f'+31{digits[1:]}'
+    if re.match(r'^6\d{8}$', digits):             # 6 + 8 digits
+        return f'+31{digits}'
+
+    return raw  # Not a Dutch mobile — return unchanged
+
+
+def _is_mobile_nl(phone: str) -> bool:
+    """Return True if *phone* is (or normalises to) a Dutch mobile number."""
+    return bool(_MOBILE_NL_RE.match(_normalize_mobile_nl(phone.strip())))
+
+
+# ---------------------------------------------------------------------------
+# Deduplication helpers
+# ---------------------------------------------------------------------------
 
 def _normalise(value: Any) -> str:
     """Return a lower-cased, stripped string for loose comparison."""
     return str(value or "").strip().lower()
 
 
-def _is_duplicate(existing_rows: list[dict], row: dict) -> bool:
+def _find_duplicate(
+    existing_rows: list[dict], row: dict
+) -> tuple[int, dict] | None:
     """
-    Return True if *row* already exists in *existing_rows*.
+    Return (0-based index, existing_row) for the first matching duplicate,
+    or None if no duplicate is found.
 
-    Two independent checks — either one is sufficient to call it a duplicate:
-      1. LinkedIn URL match (both sides must be non-empty)
-      2. Company name + DMU name match (both fields must be non-empty)
+    Two independent checks:
+      1. LinkedIn URL — compared against the 'DMU LI URL' sheet column
+         (both sides must be non-empty)
+      2. Company name + DMU name (both fields must be non-empty)
     """
     new_url     = _normalise(row.get("linkedin_url", ""))
     new_company = _normalise(row.get("Company name", ""))
     new_dmu     = _normalise(row.get("DMU name", ""))
 
-    for existing in existing_rows:
-        # URL match — only when both sides have a URL
-        if new_url and _normalise(existing.get("linkedin_url", "")) == new_url:
-            return True
+    for i, existing in enumerate(existing_rows):
+        existing_url = _normalise(existing.get("DMU LI URL", ""))
+        if new_url and existing_url and new_url == existing_url:
+            return (i, existing)
 
-        # Company + DMU match — only when both fields are non-empty
         if new_company and new_dmu:
             if (
                 _normalise(existing.get("Company name", "")) == new_company
                 and _normalise(existing.get("DMU name", "")) == new_dmu
             ):
-                return True
+                return (i, existing)
 
-    return False
+    return None
+
+
+def _update_existing_row(
+    sheet: gspread.Worksheet,
+    sheet_row_num: int,
+    headers: list[str],
+    existing: dict,
+    new_row: dict,
+) -> int:
+    """
+    Enrich an existing sheet row with data from *new_row*.
+
+    Rules:
+    - All columns: only fill cells that are currently empty.
+    - DMU phone exception: overwrite the existing value when the new value is a
+      Dutch mobile number and the existing value is not.
+
+    Returns the number of cells actually updated.
+    """
+    updates: list[tuple[str, str]] = []
+
+    for col in SHEET_COLUMNS:
+        if col == "enrich?":
+            continue
+
+        new_val = str(new_row.get(col, "")).strip()
+        old_val = str(existing.get(col, "")).strip()
+
+        if not new_val:
+            continue
+
+        if col == "DMU phone":
+            normalised = _normalize_mobile_nl(new_val)
+            if not old_val:
+                updates.append((col, normalised))
+            elif not _is_mobile_nl(old_val) and _is_mobile_nl(normalised):
+                updates.append((col, normalised))
+        else:
+            if not old_val:
+                updates.append((col, new_val))
+
+    for col, val in updates:
+        if col in headers:
+            sheet.update_cell(sheet_row_num, headers.index(col) + 1, val)
+
+    logger.info("Enriched row %d: updated %d cell(s)", sheet_row_num, len(updates))
+    return len(updates)
 
 
 # ---------------------------------------------------------------------------
@@ -198,19 +288,17 @@ def _is_duplicate(existing_rows: list[dict], row: dict) -> bool:
 
 def append_lead(row_dict: dict) -> bool:
     """
-    Write *row_dict* as a new row in the Google Sheet.
+    Write *row_dict* to the Google Sheet.
 
-    Returns True if the row was written, False if it was skipped as a duplicate.
+    - If no duplicate exists: appends a new row starting at column B
+      (column A = 'enrich?' is left untouched to preserve dropdown validation).
+    - If a duplicate exists: enriches the existing row by filling empty cells
+      and upgrading a non-mobile DMU phone to a mobile number.
 
-    *row_dict* keys should match SHEET_COLUMNS entries (case-sensitive).
-    An extra 'linkedin_url' key is used for deduplication but is NOT written
-    as its own column (LinkedIn URL is not a dedicated column in this sheet).
+    Returns True if a new row was written, False otherwise.
     """
     sheet = _get_sheet()
 
-    # Fetch all existing data for dedup check.
-    # Use get_all_values() instead of get_all_records() to avoid errors when
-    # the sheet has duplicate header names (e.g. two "notes" columns).
     try:
         all_values = sheet.get_all_values()
     except gspread.exceptions.GSpreadException as exc:
@@ -218,34 +306,40 @@ def append_lead(row_dict: dict) -> bool:
         raise
 
     if len(all_values) > 1:
-        headers = all_values[0]
+        headers       = all_values[0]
         existing_rows = [dict(zip(headers, row)) for row in all_values[1:]]
     else:
+        headers       = all_values[0] if all_values else list(SHEET_COLUMNS)
         existing_rows = []
 
-    if _is_duplicate(existing_rows, row_dict):
+    # Normalise DMU phone before any processing
+    if row_dict.get("DMU phone", "").strip():
+        row_dict = {**row_dict, "DMU phone": _normalize_mobile_nl(row_dict["DMU phone"])}
+
+    dup = _find_duplicate(existing_rows, row_dict)
+    if dup is not None:
+        dup_idx, existing_row = dup
+        sheet_row_num = dup_idx + 2  # +1 for header row, +1 for 1-based index
         logger.info(
-            "Skipping duplicate lead: company=%r dmu=%r",
-            row_dict.get("Company name"),
-            row_dict.get("DMU name"),
+            "Duplicate found at row %d — enriching existing row (company=%r dmu=%r)",
+            sheet_row_num, row_dict.get("Company name"), row_dict.get("DMU name"),
         )
+        _update_existing_row(sheet, sheet_row_num, headers, existing_row, row_dict)
         return False
 
-    # Build the row in column order; unknown keys are silently ignored
-    ordered_row = [str(row_dict.get(col, "")) for col in SHEET_COLUMNS]
-
-    # Write to the explicit next row rather than using append_row, which can
-    # mis-detect the insertion point when only some columns are populated.
-    next_row = len(all_values) + 1  # all_values includes the header row
+    # New row — write from column B onward to leave the enrich? dropdown intact
+    data_cols = [c for c in SHEET_COLUMNS if c != "enrich?"]
+    ordered_row = [str(row_dict.get(col, "")) for col in data_cols]
+    next_row = len(all_values) + 1
 
     try:
         sheet.update(
-            range_name=f"A{next_row}",
+            range_name=f"B{next_row}",
             values=[ordered_row],
             value_input_option="RAW",
         )
         logger.info(
-            "Written lead to row %d: company=%r dmu=%r",
+            "Written new lead to row %d: company=%r dmu=%r",
             next_row,
             row_dict.get("Company name"),
             row_dict.get("DMU name"),
