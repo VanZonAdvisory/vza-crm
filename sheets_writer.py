@@ -195,6 +195,14 @@ def _is_mobile_nl(phone: str) -> bool:
     return bool(_MOBILE_NL_RE.match(_normalize_mobile_nl(phone.strip())))
 
 
+def _format_phone_for_sheet(raw: str) -> str:
+    """Normalise and prefix Dutch mobile numbers with ' so Sheets treats them as text."""
+    normalised = _normalize_mobile_nl(raw)
+    if _is_mobile_nl(normalised):
+        return f"'{normalised}"
+    return normalised
+
+
 # ---------------------------------------------------------------------------
 # Deduplication helpers
 # ---------------------------------------------------------------------------
@@ -271,10 +279,11 @@ def _update_existing_row(
 
         if col == "DMU phone":
             normalised = _normalize_mobile_nl(new_val)
+            formatted  = _format_phone_for_sheet(new_val)
             if not old_val:
-                updates.append((col, normalised))
+                updates.append((col, formatted))
             elif not _is_mobile_nl(old_val) and _is_mobile_nl(normalised):
-                updates.append((col, normalised))
+                updates.append((col, formatted))
         else:
             if not old_val:
                 updates.append((col, new_val))
@@ -316,9 +325,9 @@ def append_lead(row_dict: dict) -> str:
         headers       = all_values[0] if all_values else list(SHEET_COLUMNS)
         existing_rows = []
 
-    # Normalise DMU phone before any processing
+    # Normalise and format DMU phone before any processing
     if row_dict.get("DMU phone", "").strip():
-        row_dict = {**row_dict, "DMU phone": _normalize_mobile_nl(row_dict["DMU phone"])}
+        row_dict = {**row_dict, "DMU phone": _format_phone_for_sheet(row_dict["DMU phone"])}
 
     dup = _find_duplicate(existing_rows, row_dict)
     if dup is not None:
